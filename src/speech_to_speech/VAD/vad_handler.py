@@ -92,12 +92,24 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.unanswered_reopen_ms = max(self.speculative_reopen_ms, unanswered_reopen_ms)
         self.short_segment_merge_ms = max(0, short_segment_merge_ms)
         self._last_turn_detection: dict | None = None
-        self.model, _ = torch.hub.load(
-            "snakers4/silero-vad",
-            "silero_vad",
-            trust_repo=True,
-            skip_validation=True,
-        )
+        # fork(speech-to-kimi-code): torch.hub.load 每次加载前会无超时地探测
+        # GitHub 默认分支，GitHub 不可达时挂死/报错；失败时回退本地 torch hub 缓存
+        try:
+            self.model, _ = torch.hub.load(
+                "snakers4/silero-vad",
+                "silero_vad",
+                trust_repo=True,
+                skip_validation=True,
+            )
+        except Exception:
+            # GitHub 不可达时回退到本地 torch hub 缓存
+            import os.path as _osp
+            _local_repo = _osp.join(torch.hub.get_dir(), "snakers4_silero-vad_master")
+            self.model, _ = torch.hub.load(
+                _local_repo,
+                "silero_vad",
+                source="local",
+            )
         self.iterator = VADIterator(
             self.model,
             threshold=thresh,

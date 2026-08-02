@@ -43,7 +43,9 @@ class ParaformerSTTHandler(BaseSTTHandler):
                 "Paraformer STT requires the optional 'paraformer' extra. "
                 "Install it with `pip install speech-to-speech[paraformer]`."
             ) from exc
-        self.model = AutoModel(model=model_name, device=device)
+        # fork(speech-to-kimi-code): disable_update=True 跳过 funasr 启动时的
+        # PyPI 版本检查（境外站、无超时，网络差时会卡死启动；纯提醒无功能作用）
+        self.model = AutoModel(model=model_name, device=device, disable_update=True)
         self.warmup()
 
     def warmup(self) -> None:
@@ -59,7 +61,10 @@ class ParaformerSTTHandler(BaseSTTHandler):
         logger.debug("infering paraformer...")
 
         pred_text = self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")
-        torch.mps.empty_cache()
+        # fork(speech-to-kimi-code): torch.mps 仅在 Apple Silicon 上存在，
+        # Windows/Linux 无 MPS 后端时裸调会抛 AttributeError
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
         logger.debug("finished paraformer inference")
         console.print(f"[yellow]USER: {pred_text}")

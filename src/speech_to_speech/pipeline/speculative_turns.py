@@ -100,14 +100,26 @@ class SpeculativeTurnTracker:
             return True
         with self._condition:
             self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
-            return self._commit_locked(turn_id, revision)
+            latest = self._latest_revision.get(turn_id, revision)
+            if revision != latest:
+                return False
+            self._committed_revision[turn_id] = revision
+            logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
+            self._condition.notify_all()
+            return True
 
     def commit_if_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
             return True
         with self._condition:
             self._wait_for_reopen_gate_locked(turn_id, revision)
-            return self._commit_locked(turn_id, revision)
+            latest = self._latest_revision.get(turn_id, revision)
+            if revision != latest:
+                return False
+            self._committed_revision[turn_id] = revision
+            logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
+            self._condition.notify_all()
+            return True
 
     def try_commit_if_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool | None:
         """Non-blocking variant of ``commit_if_latest_after_pending_reopen``.
@@ -120,7 +132,13 @@ class SpeculativeTurnTracker:
         with self._condition:
             if self._has_pending_reopen_locked(turn_id, revision):
                 return None
-            return self._commit_locked(turn_id, revision)
+            latest = self._latest_revision.get(turn_id, revision)
+            if revision != latest:
+                return False
+            self._committed_revision[turn_id] = revision
+            logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
+            self._condition.notify_all()
+            return True
 
     def try_commit_if_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool | None:
         if turn_id is None or revision is None:
@@ -135,7 +153,13 @@ class SpeculativeTurnTracker:
                 > 0
             ):
                 return None
-            return self._commit_locked(turn_id, revision)
+            latest = self._latest_revision.get(turn_id, revision)
+            if revision != latest:
+                return False
+            self._committed_revision[turn_id] = revision
+            logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
+            self._condition.notify_all()
+            return True
 
     def has_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
@@ -208,7 +232,11 @@ class SpeculativeTurnTracker:
                     "Deferring speculative turn %s revision %d commit while reopen is pending", turn_id, revision
                 )
                 return
-            self._commit_locked(turn_id, revision)
+            latest = self._latest_revision.get(turn_id, revision)
+            if revision == latest:
+                self._committed_revision[turn_id] = revision
+                logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
+                self._condition.notify_all()
 
     def is_committed(self, turn_id: str | None, revision: int | None = None) -> bool:
         if turn_id is None:
@@ -311,28 +339,6 @@ class SpeculativeTurnTracker:
             return
         with self._condition:
             self._wait_for_pending_reopen_locked(turn_id, revision, timeout_s)
-
-    def _commit_locked(self, turn_id: str, revision: int) -> bool:
-        """Record *revision* as committed when it is still the tracked latest.
-
-        Returns whether the caller's output for *revision* is still valid.
-
-        A turn that is no longer tracked is deliberately not written back:
-        ``_prune_tracked_turns`` only walks ``_latest_revision``, so a committed
-        entry without a tracked turn would never be reclaimed, and a recycled
-        turn id would then read as already committed. Such a commit still
-        reports success, since dropping the output of a turn the tracker simply
-        no longer knows about would be worse than emitting it.
-        """
-        latest = self._latest_revision.get(turn_id)
-        if latest is None:
-            return True
-        if revision != latest:
-            return False
-        self._committed_revision[turn_id] = revision
-        logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
-        self._condition.notify_all()
-        return True
 
     def _has_pending_reopen_locked(self, turn_id: str, revision: int) -> bool:
         pending = self._pending_reopen.get(turn_id)
