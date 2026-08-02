@@ -229,3 +229,11 @@ dmypy.json
 cover/
 .tox/
 uv.lock
+# ---- speech-to-kimi-code 本地运行产物（勿上传） ----
+logs/
+voice-bridge/sessions.json
+voice-dispatch-notes.md
+voice-bridge/config.json
+voice-bridge/gate.state
+# 总管人设与各机私有配置（语音总管会话读它；人设由用户自配，不入库）
+AGENTS.md

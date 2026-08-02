@@ -1,4 +1,29 @@
 <div align="center">
+
+# speech-to-kimi-code
+
+**用语音驱动 Kimi Code Web 干活 —— 基于 huggingface/speech-to-speech 的二次开发**
+
+</div>
+
+> **本项目是什么**：这是 [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech) 的 fork（Apache 2.0），在原版 VAD → STT → LLM → TTS 语音管线基础上，新增了把语音指令接入 **Kimi Code Web** 的完整方案：说话即可让本机 Kimi Code 在任意项目的会话里干活，并把结果用语音汇报回来。
+>
+> **非官方声明**：本项目为个人开源作品，与 Hugging Face、Moonshot AI（月之暗面）均无隶属或官方合作关系。"Kimi"、"Kimi Code" 商标归 Moonshot AI 所有，此处仅为描述兼容性使用。
+
+## 本 fork 与上游的差异
+
+- **`voice-bridge/`**：自研 FastAPI 桥接适配器（不含 LLM）。对 speech-to-speech 暴露 OpenAI 兼容接口，把识别出的文字转发给 Kimi Code Web 里的「语音总管」会话，取回回复交给 TTS 朗读。详见 `voice-bridge/README.md`。
+- **「语音总管」设计**：总管是一个 Kimi Code 会话（所在目录由 `voice-bridge/config.json` 的 `hub_cwd` 决定，缺省为项目根），它自己决定闲聊直答，或把任务派给其他项目目录下的会话执行。总管的人设与派单手册由用户在总管会话目录的 `AGENTS.md` 中自行配置（本机私有，本项目暂不提供默认模板，后续将以更友好的方式提供）。
+- **`voice-bridge/voice-launcher.pyw` + `voice-assistant.ps1`（兼容壳）+ `speech-to-kimi-entry.py`**：Windows 一键启动（桌面快捷方式直接指向 pythonw，无终端窗口闪现；快捷方式只负责启动，停止走托盘图标右键「退出」）。启动时有浅色进度卡片实时展示五个阶段（适配器 → 运行依赖库 → 语音识别模型 → 语音合成模型 → 连接语音总管），全部就绪后卡片自动关闭、托盘图标才出现。
+- **录音门控（`voice-bridge/mic-gate.pyw` + `speech-to-kimi-entry.py` 音频入口补丁）**：门控在音频入口（麦克风帧进 VAD 前喂静音），默认静音，按住右 Ctrl 说话或 F9 切换常听，**立即生效无宽限期**（松开后在途那句会自然识别送达，新声音进不来），托盘图标显示状态；从根上避免音箱外放的 TTS 回复被麦克风回收入。
+- **真正的 fork（基线 v0.2.11，可编辑安装）**：venv 直接安装本仓库 `src/`（`pip install -e .`），fork 对上游管线的修复（MPS 平台判断、nltk 路径、VAD 本地缓存回退、funasr 跳过更新检查）作为正式源码改动写在 `src/` 里（带 `fork(speech-to-kimi-code)` 注释标记），不再依赖 site-packages 补丁。仅剩 1 个第三方库补丁（transformers），装依赖后跑一次 `scripts/apply-upstream-patches.py` 即可。详见 `docs/upstream-patches.md`；跟随上游更新的策略见 `docs/upstream-tracking.md`。
+- **中文链路调优**：Paraformer STT + Qwen3-TTS（Vivian 音色）+ 中文语气指令的实测可用配置，见 `voice-bridge/voice-launcher.pyw` 中的 `S2S_ARGS` 启动参数。
+
+上游原始 README 如下：
+
+---
+
+<div align="center">
   <div>&nbsp;</div>
   <img src="https://raw.githubusercontent.com/huggingface/speech-to-speech/main/logo.png" width="600"/>
 
