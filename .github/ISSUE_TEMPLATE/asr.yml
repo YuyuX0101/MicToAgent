@@ -1,0 +1,30 @@
+name: 误听
+description: 识别结果错字、热词没生效
+title: "[误听] "
+labels: ["asr"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        热词可写在 `voice-bridge/hotwords.txt`（一行一词，或 `错误词=>目标词`），保存后下一句生效。
+        **不要**把整段识别原文贴到公开 issue。
+  - type: textarea
+    id: heard
+    attributes:
+      label: 听成了什么 / 实际想说什么
+      description: 用短例子即可，不必贴整段对话。
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: 识别引擎（config.json 的 core.stt_engine）
+      options:
+        - dual（默认）
+        - qwen3_asr
+        - 不确定
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充
+      description: 是否已加热词、是否只在最后一片出错（dual 最后一片是 SenseVoice 初稿）等。

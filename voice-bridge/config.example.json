@@ -1,0 +1,29 @@
+{
+  "kimi_web_base": "http://127.0.0.1:58627",
+  "listen_host": "127.0.0.1",
+  "listen_port": 9100,
+  "follow_poll_interval_sec": 0.7,
+  "poll_interval_sec": 2.5,
+  "max_wait_sec": 1800,
+  "warmup_text": "hello",
+  "warmup_reply": "语音助手已就绪。",
+  "cleanup_min_chars": 300,
+  "cleanup_timeout_sec": 90,
+  "gate_ptt_keys": [
+    "right ctrl"
+  ],
+  "gate_toggle_keys": [
+    "right ctrl"
+  ],
+  "core": {
+    "stt_engine": "dual",
+    "stt_num_threads": 4,
+    "vad_threshold": 0.5,
+    "min_silence_ms": 300,
+    "min_speech_ms": 384,
+    "min_speech_continuation_ms": 192,
+    "speech_pad_ms": 500,
+    "reopen_grace_ms": 1200,
+    "post_timeout_sec": 120
+  }
+}

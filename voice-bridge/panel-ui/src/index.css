@@ -1,0 +1,87 @@
+@import "tailwindcss";
+@import "@fontsource/inter/latin-500.css";
+@import "@fontsource/inter/latin-600.css";
+
+@theme {
+  /* cir-tabs 设计语言：纸面云白 + 墨色 + 柔和分层阴影 */
+  --color-ink: #0e1116;
+  --color-ink-hover: #23272f;
+  --color-mist: #5b6472;
+  --color-faint: #a5acb8;
+  --color-cloud: #ffffff;
+  --color-edge: #e3e8ee;
+  --color-hairline: #eef1f4;
+  --color-page: #fafbfc;
+  --color-accent: #2e7def;
+  --color-live: #22c55e;
+  --color-danger: #ef4444;
+  --font-sans: "Inter", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  /* 用户明确不要组件阴影：卡片/胶囊全平，层次靠描边和底色 */
+  --shadow-card: none;
+  --shadow-pill: none;
+  --ease-fluid: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+html,
+body {
+  background: transparent;
+}
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* 可点击元素恢复手型光标（Tailwind v4 preflight 把 button 归一成默认箭头） */
+button,
+[role="button"] {
+  cursor: pointer;
+}
+
+/* 页面切换：轻微上浮淡入，180ms 内结束 */
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.page-in {
+  animation: page-in 180ms var(--ease-fluid);
+}
+
+/* 悬停气泡：从触发元素上方浮出（水平定位由外层包裹元素负责） */
+@keyframes tip-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.tip-in {
+  animation: tip-in 140ms var(--ease-fluid);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-in,
+  .tip-in {
+    animation: none;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+  }
+}

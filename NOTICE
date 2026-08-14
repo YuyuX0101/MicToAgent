@@ -1,0 +1,29 @@
+MicToAgent
+=======
+
+本项目包含以下第三方源码/组件，许可证与版权归属如下：
+
+1. voice-bridge/vendor/postprocess_hotwords.py
+   来源：FunASR（https://github.com/modelscope/FunASR），拷贝自 funasr 1.4.0
+   的 funasr/utils/postprocess_hotwords.py。
+   许可证：MIT License（版权头保留在文件内，全文见
+   voice-bridge/vendor/LICENSE.MIT）。
+   Copyright FunASR (https://github.com/modelscope/FunASR). All Rights Reserved.
+
+2. ten-vad（models/ten-vad.onnx，VAD 模型）
+   来源：https://github.com/TEN-framework/ten-vad（经 sherpa-onnx 项目
+   添加 metadata 后分发）。
+   许可证：修改版 Apache License 2.0（商用前请阅读其 LICENSE）。
+
+3. Qwen3-ASR 模型（models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/）
+   来源：Alibaba Qwen 团队，sherpa-onnx 项目转换分发（int8）。
+   许可证：Apache License 2.0。
+
+4. SenseVoice-Small 模型（models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/，
+   dual 接力的初稿引擎）
+   来源：Alibaba 通义实验室 FunAudioLLM，sherpa-onnx 项目转换分发。
+   许可证：以其模型发布页为准（FunASR 模型许可）。
+
+5. sherpa-onnx（运行时依赖，pip 包）
+   来源：https://github.com/k2-fsa/sherpa-onnx
+   许可证：Apache License 2.0。

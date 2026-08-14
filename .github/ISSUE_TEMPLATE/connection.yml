@@ -1,0 +1,36 @@
+name: 连不上
+description: 适配器、Kimi Web、选中会话对不上，语音发不出去
+title: "[连不上] "
+labels: ["connection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先核对：本机已用 `kimi web --dangerous-bypass-auth`、浏览器地址栏端口和 `kimi_web_base` 一致、用的是 Chrome/Edge。
+        **不要**粘贴 `logs/` 全文（里面有识别原文）。
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象
+      placeholder: 例如托盘已出现，说话后网页没字；或弹出「Kimi Web 没有运行」。
+    validations:
+      required: true
+  - type: input
+    id: kimi_url
+    attributes:
+      label: 浏览器地址栏里 Kimi Web 的主机和端口
+      placeholder: 例如 localhost:58627
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境
+      value: |
+        - Windows 版本：
+        - 浏览器：Chrome / Edge
+        - 是否按 README 用了 `kimi web --dangerous-bypass-auth`：
+        - MicToAgent 版本或 commit：
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志摘录（可打码）
+      description: 只贴适配器报错那几行，删掉识别原文。

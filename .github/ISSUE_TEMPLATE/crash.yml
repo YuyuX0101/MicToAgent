@@ -1,0 +1,40 @@
+name: 崩溃
+description: 进程退出、托盘消失、启动卡死
+title: "[崩溃] "
+labels: ["crash"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        日志在 `logs/`（每次启动覆盖）。**不要**把识别原文整段贴上来。
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象
+      placeholder: 例如启动卡在「加载语音识别模型」；或说话时 mic-gate 退出。
+    validations:
+      required: true
+  - type: dropdown
+    id: which
+    attributes:
+      label: 哪个进程
+      options:
+        - voice-launcher（启动卡片）
+        - adapter（桥接）
+        - voice-core（识别）
+        - mic-gate（托盘 / 右Ctrl）
+        - 不确定
+      default: 4
+  - type: textarea
+    id: traceback
+    attributes:
+      label: 报错摘录
+      description: traceback 或 err.log 末尾，删掉识别原文。
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境
+      value: |
+        - Windows 版本：
+        - Python / venv 是否用仓库里的 `.venv`：
+        - MicToAgent 版本或 commit：
