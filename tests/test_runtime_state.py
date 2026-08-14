@@ -202,6 +202,12 @@ def test_panel_prefs_rejects_unknown(state_dir):
 def test_autostart_shortcut_roundtrip(tmp_path, monkeypatch):
     lnk = tmp_path / "MicToAgent.lnk"
     monkeypatch.setattr("runtime_state.startup_shortcut_path", lambda: lnk)
+    # CI 上没有 .venv：造一个假的 pythonw.exe 满足 set_autostart 的前置检查
+    fake_root = tmp_path / "root"
+    pythonw = fake_root / ".venv" / "Scripts" / "pythonw.exe"
+    pythonw.parent.mkdir(parents=True)
+    pythonw.touch()
+    monkeypatch.setattr("runtime_state.project_root", lambda: fake_root)
     assert autostart_enabled() is False
     set_autostart(True)
     assert lnk.is_file()
