@@ -8,6 +8,11 @@
 
 > 非官方项目，与 Moonshot AI 无隶属关系。"Kimi" 商标归 Moonshot AI 所有。本工具不收集账号、不转发语音。
 
+<p align="center">
+  <img src="docs/screenshots/panel-home.png" width="280" alt="控制面板" />
+  <img src="docs/screenshots/panel-settings.png" width="280" alt="设置页" />
+</p>
+
 ## 它做什么 / 不做什么
 
 - **做**：Windows 上对着麦克风说话，把识别出的文字打进当前 agent 会话（和你打字等价）。目前对接本机 `kimi web`。

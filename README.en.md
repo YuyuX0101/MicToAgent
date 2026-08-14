@@ -8,6 +8,11 @@ The first adapter talks to **local Kimi Code Web** (hold or tap Right Ctrl).
 
 > Unofficial. Not affiliated with Moonshot AI. "Kimi" is a trademark of Moonshot AI. This tool does not collect accounts or forward audio.
 
+<p align="center">
+  <img src="docs/screenshots/panel-home.png" width="280" alt="Control panel" />
+  <img src="docs/screenshots/panel-settings.png" width="280" alt="Settings" />
+</p>
+
 ## What it does / does not
 
 - **Does**: On Windows, speak into the mic; recognized text is typed into the current agent session (same as typing). Currently wired to local `kimi web`.
