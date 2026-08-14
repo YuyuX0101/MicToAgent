@@ -13,6 +13,15 @@ Currently wired to **local Kimi Code Web**: **tap Right Ctrl** to toggle always-
   <img src="docs/screenshots/panel-settings.png" width="280" alt="Settings" />
 </p>
 
+## Highlights
+
+- **Text the moment you stop talking**: dual-engine relay — each speech segment gets an instant draft from SenseVoice while qwen3-asr refines it in the background; submission only waits for the draft, so there's zero lag. Pause mid-sentence to think and your words are stitched into one message, not split into two.
+- **Three send modes, one click in the panel**: **Fast send** = straight into the current session, zero interruption (no images); **Dialog send** = paste and Enter, images allowed; **Compose box** = paste only, edit freely before sending. Hover any button for its description.
+- **Follows your session seamlessly**: whichever session you select in Kimi Web is where your voice goes — switch sessions on the page and just keep talking, nothing to reconfigure. The panel shows the live workspace and session name, synced within a second when you rename a session.
+- **One key, two styles**: **tap Right Ctrl** to toggle always-listening for hands-free multi-turn talk; **hold Right Ctrl** for push-to-talk, sent on release.
+- **Hotwords that learn**: put misheard words in `voice-bridge/hotwords.txt` (one per line) and the very next sentence is corrected — no restart. Teach it your jargon and project terms.
+- **Voice never leaves your machine**: recognition runs entirely locally (CPU-only, no GPU needed); audio is never sent to any third-party cloud.
+
 ## System requirements
 
 Recognition runs locally — check before installing:
