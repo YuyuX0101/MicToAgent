@@ -9,6 +9,10 @@ Currently wired to **local Kimi Code Web**: **tap Right Ctrl** to toggle always-
 > Unofficial. Not affiliated with Moonshot AI. "Kimi" is a trademark of Moonshot AI. This tool does not collect accounts or forward audio.
 
 <p align="center">
+  <img src="docs/screenshots/demo.gif" width="720" alt="Demo: voice straight into the Kimi Code session" />
+</p>
+
+<p align="center">
   <img src="docs/screenshots/panel-home.png" width="280" alt="Control panel" />
   <img src="docs/screenshots/panel-settings.png" width="280" alt="Settings" />
 </p>

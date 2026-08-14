@@ -9,6 +9,10 @@
 > 非官方项目，与 Moonshot AI 无隶属关系。"Kimi" 商标归 Moonshot AI 所有。本工具不收集账号、不转发语音。
 
 <p align="center">
+  <img src="docs/screenshots/demo.gif" width="720" alt="演示：语音直达 Kimi Code 会话" />
+</p>
+
+<p align="center">
   <img src="docs/screenshots/panel-home.png" width="280" alt="控制面板" />
   <img src="docs/screenshots/panel-settings.png" width="280" alt="设置页" />
 </p>
