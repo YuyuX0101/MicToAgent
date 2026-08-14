@@ -13,9 +13,19 @@ Currently wired to **local Kimi Code Web**: **tap Right Ctrl** to toggle always-
   <img src="docs/screenshots/panel-settings.png" width="280" alt="Settings" />
 </p>
 
-## Quick start
+## System requirements
 
-Requirements: Windows 10+, Python **3.10+**, Chrome or Edge, a microphone, [Kimi Code CLI](https://www.kimi.com/code) installed. CPU only — no GPU needed.
+Recognition runs locally — check before installing:
+
+| Item | Requirement |
+| --- | --- |
+| OS | Windows 10 / 11 (64-bit); the panel needs the WebView2 runtime (built into Win11, usually preinstalled on Win10) |
+| CPU | CPU-only inference, **no GPU needed**; 4+ cores recommended (recognition uses 4 threads by default) |
+| RAM | ≥ 4 GB free (the two recognition models stay resident, ~1.5 GB) |
+| Disk | ~1.2 GB for models, ~2 GB total including Python dependencies |
+| Other | Python **3.10+**, Chrome or Edge, a microphone, [Kimi Code CLI](https://www.kimi.com/code) installed |
+
+## Quick start
 
 **Step 1 · Start Kimi Web** (run in a terminal, keep it running)
 

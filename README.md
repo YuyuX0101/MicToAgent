@@ -13,9 +13,19 @@
   <img src="docs/screenshots/panel-settings.png" width="280" alt="设置页" />
 </p>
 
-## 快速开始
+## 设备要求
 
-要求：Windows 10+、Python **3.10+**、Chrome 或 Edge、麦克风、已装 [Kimi Code CLI](https://www.kimi.com/code)。纯 CPU 运行，不需要 GPU。
+识别模型在本地跑，装机前确认一下：
+
+| 项 | 要求 |
+| --- | --- |
+| 系统 | Windows 10 / 11（64 位）；面板依赖 WebView2 运行时（Win11 自带，Win10 一般已预装） |
+| CPU | 纯 CPU 推理，**不需要 GPU**；建议 4 核及以上（识别默认占 4 线程） |
+| 内存 | 可用 ≥ 4 GB（两个识别模型常驻内存约 1.5 GB） |
+| 磁盘 | 模型约 1.2 GB，连同 Python 依赖预留约 2 GB |
+| 其他 | Python **3.10+**、Chrome 或 Edge、麦克风、已装 [Kimi Code CLI](https://www.kimi.com/code) |
+
+## 快速开始
 
 **第 1 步 · 启动 Kimi Web**（在终端执行，保持运行）
 
