@@ -1,10 +1,14 @@
 # 安全策略
 
+本文件只针对**安全漏洞**。普通的 bug、功能建议、使用问题请直接开
+[Issue](https://github.com/YuyuX0101/MicToAgent/issues/new/choose)，非常欢迎，不用走这里的渠道。
+
 ## 如何报告漏洞
 
-请用 GitHub 仓库的 **Security Advisories**（仓库页 → Security），或私下联系仓库 Owner。不要开公开 issue。
+安全漏洞请**不要**开公开 issue，改用 GitHub 的 **Security Advisories**
+（仓库页 → Security → Report a vulnerability）私下报告，或私下联系仓库 Owner。
 
-不要在 issue、PR 或讨论区粘贴：
+## 任何场合都不要贴出来的内容
 
 - `logs/` 内容（含语音识别原文）
 - `voice-bridge/config.json`、`.env`、token、热词里的个人映射

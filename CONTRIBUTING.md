@@ -1,5 +1,9 @@
 # 参与贡献
 
+先说一句：**提 issue 也是贡献**。bug、功能建议、使用问题都欢迎直接开
+[Issue](https://github.com/YuyuX0101/MicToAgent/issues/new/choose)，不用先问、不用犹豫。
+唯一的例外是安全漏洞，请走 [`SECURITY.md`](SECURITY.md) 的私下渠道。
+
 欢迎修 bug、补测试、改文档。改语音链路或适配器前请先读：
 
 - [`voice-core.py`](voice-bridge/voice-core.py) 文件头（切段 / 宽限 / 双引擎的权威描述）
