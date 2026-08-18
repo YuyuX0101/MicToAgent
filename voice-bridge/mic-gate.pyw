@@ -41,6 +41,7 @@ import ctypes
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 
@@ -146,13 +147,30 @@ def _speaking() -> bool:
 
 
 def _write_gate(value: str) -> None:
-    """原子写门控状态文件（voice-core 按 mtime 缓存读取）。"""
+    """原子写门控状态文件（voice-core 按 mtime 缓存读取）。
+
+    Windows 上杀软/搜索索引可能在 replace 瞬间锁住目标文件（PermissionError），
+    快速连写（点按双模键一次松手会连写 "2"→"1"→"0"）时尤其容易撞锁。
+    失败重试几次；仍失败不吞——打印到 err.log，由轮询循环的看门狗兜底自愈，
+    否则会出现「托盘红色静音、gate.state 却是开门、语音照收」的状态分裂。
+    """
+    for _ in range(3):
+        try:
+            tmp = GATE_STATE.with_suffix(".tmp")
+            tmp.write_text(value, encoding="ascii")
+            os.replace(tmp, GATE_STATE)
+            return
+        except OSError:
+            time.sleep(0.05)
+    print(f"[mic-gate] gate.state 写入失败（值 {value!r}），等待看门狗重试",
+          file=sys.stderr, flush=True)
+
+
+def _gate_on_disk() -> str:
     try:
-        tmp = GATE_STATE.with_suffix(".tmp")
-        tmp.write_text(value, encoding="ascii")
-        os.replace(tmp, GATE_STATE)
-    except Exception:
-        pass  # 写失败时音频侧保持上次状态，下次切换再同步
+        return GATE_STATE.read_text(encoding="ascii").strip()
+    except OSError:
+        return ""
 
 
 _TITLES = {
@@ -226,6 +244,13 @@ def _poll_loop() -> None:
             _set_listen(False)
         elif cmd == "1":
             _set_listen(True)
+
+        # 看门狗：每秒核对一次「文件 vs 内部状态」。_write_gate 撞锁重试
+        # 仍失败时这里兜底重写，保证托盘图标、gate.state、实际收音三者一致
+        if anim_tick % 20 == 0 and _gate_on_disk() != _gate_value():
+            print(f"[mic-gate] gate.state 与内部状态不一致，重写为 {_gate_value()!r}",
+                  file=sys.stderr, flush=True)
+            _write_gate(_gate_value())
         now = time.monotonic()
         for vk in PURE_PTT_VKS:
             down = _key_down(vk)
