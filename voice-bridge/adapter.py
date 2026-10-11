@@ -5,8 +5,7 @@ Copyright 2026 MicToAgent contributors
 
 对 voice-core 暴露 OpenAI 兼容的 POST /v1/chat/completions（含 SSE 流式），
 把语音转出的文字转发给 kimi web 里当前选中的会话。提交即返回（不等目标
-会话跑完）。适配器本身不做对话，只做转发、轮询和状态管理；超过阈值的
-长段会先调 kimi CLI 整理再转发。
+会话跑完）。适配器本身不做对话，只做转发、轮询和状态管理。
 
 目标会话 = 浏览器里当前选中的会话（target_resolver 后台轮询地址栏缓存，
 发送前再同步刷新一次约 25ms，刚切换会话就说话也命中正确的目标）。
@@ -72,63 +71,11 @@ logger = logging.getLogger("voice-bridge")
 _ready: bool = False
 _last_notice: str = ""
 
-# 长段转写整理：超过阈值的长文本先过一遍 kimi CLI 一次性清理（去口头禅、
-# 理顺磕巴重复，保留全部信息和原意），再发给目标会话；失败/超时发原文。
-# 短指令不整理，零额外延迟。kimi.exe 用全路径，不依赖 PATH。
-_CLEANUP_MIN_CHARS = int(CONFIG.get("cleanup_min_chars", 300))
-_CLEANUP_TIMEOUT_S = float(CONFIG.get("cleanup_timeout_sec", 90))
-_KIMI_CLI = os.path.expandvars(os.path.expanduser(
-    os.environ.get("KIMI_CLI")
-    or str(Path.home() / ".kimi-code" / "bin" / "kimi.exe")
-))
-
-_CLEANUP_PROMPT = (
-    "你是语音转写整理器。把下面的中文语音转写整理成通顺、连贯的书面中文："
-    "去掉口头禅和语气词（呃、嗯、那个、就是等），理顺磕巴、重复和半截句，"
-    "保留全部事实信息和原意，不要回答转写的内容，不要加任何评论或解释，"
-    "只输出整理后的文字。\n\n"
-)
-
-
-def _extract_assistant_text(output: str) -> str:
-    """从 kimi --output-format stream-json 的输出里取最后一条 assistant 文本。"""
-    cleaned = ""
-    for line in output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            evt = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if evt.get("role") == "assistant" and evt.get("content"):
-            cleaned = str(evt["content"])
-    return cleaned.strip()
-
-
-async def _cleanup_transcript(text: str) -> str:
-    """kimi -p 一次性模式整理长段转写。任何失败都回退原文。"""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            _KIMI_CLI, "--output-format", "stream-json", "-p",
-            _CLEANUP_PROMPT + text,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            cwd=str(BASE_DIR),
-        )
-        out, _ = await asyncio.wait_for(proc.communicate(),
-                                        timeout=_CLEANUP_TIMEOUT_S)
-        if proc.returncode != 0:
-            logger.warning("转写整理退出码 %s，发原文", proc.returncode)
-            return text
-        cleaned = _extract_assistant_text(out.decode("utf-8", "replace"))
-        return cleaned or text
-    except Exception:
-        logger.exception("转写整理失败，发原文")
-        return text
-
 # 跟随当前选中会话的解析器（启动事件里 start）
-from target_resolver import FollowUiResolver
+from target_resolver import FollowUiResolver, set_address_aliases
+
+# 本机私有地址别名（config.json 的 kimi_web_aliases，gitignore 不外传）
+set_address_aliases(CONFIG.get("kimi_web_aliases", []))
 
 _resolver = FollowUiResolver(KIMI, CONFIG.get("follow_poll_interval_sec", 0.7))
 
@@ -250,12 +197,6 @@ async def handle_user_text(text: str) -> str:
         _ready = True
         return CONFIG["warmup_reply"]
 
-    if len(text) >= _CLEANUP_MIN_CHARS:
-        t0 = time.monotonic()
-        text = await _cleanup_transcript(text)
-        logger.info("转写整理完成: %d 字, 耗时 %.1fs",
-                    len(text), time.monotonic() - t0)
-
     mode = read_send_mode()
     # 只打本机 kimi web，忽略系统代理（Clash 等会把 127.0.0.1 拐走）
     async with httpx.AsyncClient(trust_env=False) as client:
@@ -263,6 +204,8 @@ async def handle_user_text(text: str) -> str:
             _notify("Kimi Web 没有运行，语音指令没有发出去")
             return "Kimi Web 没有运行。"
 
+        # 目标会话在收到文字时就锁定：若等耗时处理完再解析，会把话发到
+        # 用户等待期间切换到的会话（实测事故）
         sid = await asyncio.to_thread(_resolve_target)
         on_web = _resolver.on_kimi_web()
         logger.info("发送模式=%s 会话=%s 在网页=%s", mode, sid, on_web)

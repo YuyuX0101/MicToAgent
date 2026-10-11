@@ -1,8 +1,7 @@
 # voice-bridge — 语音接入 Kimi Web 的桥接适配器
 
 把 voice-core 语音核心和 Kimi Web 会话连起来的传声筒。
-适配器本身不做对话，只做转发、轮询和状态管理；超过阈值的长段会先调
-kimi CLI 整理再转发。
+适配器本身不做对话，只做转发、轮询和状态管理。
 
 ## 架构
 
@@ -114,15 +113,6 @@ voice-core、mic-gate、控制面板；已在运行→打开控制面板。停�
 - `GET /health` — 存活检查
 - `GET /ready` — 端到端就绪（voice-core 预热文本已到达）
 - `GET /v1/panel` / `POST /v1/panel` — 控制面板：发送模式、门控、当前会话；POST `{"send_mode":"dialog"}` 或 `{"mute":true}`
-
-## 长段转写整理（adapter.py）
-
-超过 `cleanup_min_chars`（默认 300 字）的长段语音转写，在发给目标会话之前
-先过一遍 `kimi -p --output-format stream-json` 一次性清理：去口头禅语气词、
-理顺磕巴重复和半截句，保留全部事实信息和原意。整理增加约 10~20 秒延迟，
-失败或超时（`cleanup_timeout_sec`，默认 90s）自动回退发原文；短指令不触发，
-零额外延迟。每次整理会产生一个一次性 kimi 会话记录（可用
-clean-archived-sessions 技能定期清理）。
 
 ## 录音门控（mic-gate.pyw + voice-core 音频回调）
 

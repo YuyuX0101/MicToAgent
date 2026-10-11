@@ -29,7 +29,8 @@ py -3 scripts\download_models.py
 ## sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/
 
 qwen3-asr 0.6B int8 离线识别模型（sherpa-onnx 版），dual 接力模式的精修引擎
-（`stt_engine="qwen3_asr"` 时为单引擎）。支持热词解码偏置。
+（`stt_engine="qwen3_asr"` 时为单引擎）。模型本身支持热词解码偏置，本项目
+未启用（偏置词占 max_total_len=512 的 prompt 额度，词表增长曾致生成静默为空）。
 来源：https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2
 解压后目录名保持 `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/`，放到 `models/` 下。
 

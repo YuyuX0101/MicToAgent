@@ -7,8 +7,6 @@
   "max_wait_sec": 1800,
   "warmup_text": "hello",
   "warmup_reply": "语音助手已就绪。",
-  "cleanup_min_chars": 300,
-  "cleanup_timeout_sec": 90,
   "gate_ptt_keys": [
     "right ctrl"
   ],
@@ -24,6 +22,7 @@
     "min_speech_continuation_ms": 192,
     "speech_pad_ms": 500,
     "reopen_grace_ms": 1200,
+    "refine_max_sec": 25,
     "post_timeout_sec": 120
   }
 }

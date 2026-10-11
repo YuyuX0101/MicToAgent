@@ -35,6 +35,27 @@ except Exception:  # pragma: no cover - 取决于运行环境
 _BROWSER_PROCESSES = {"msedge.exe", "chrome.exe"}
 _BROWSER_WNDCLASS = "Chrome_WidgetWin_1"
 
+# 本机私有地址别名（如用局域网 IP 访问同一 kimi web 实例）。
+# 由 set_address_aliases 在适配器启动时注册，匹配逻辑对三个调用方
+# （跟随轮询 / 发送前刷新 / 粘贴前置检查）统一生效。
+_EXTRA_AUTHORITIES: list[str] = []
+
+
+def set_address_aliases(bases) -> None:
+    """注册额外地址：host:port 或完整 URL（如 http://192.168.x.x:58627）。"""
+    _EXTRA_AUTHORITIES.clear()
+    for base in bases or []:
+        netloc = urlparse(base if "://" in str(base) else f"http://{base}").netloc
+        if netloc and netloc not in _EXTRA_AUTHORITIES:
+            _EXTRA_AUTHORITIES.append(netloc)
+
+
+def _authority_alt(port: int) -> str:
+    """地址栏匹配的 authority 交替式：localhost/127.0.0.1:port + 私有别名。"""
+    auths = [f"localhost:{port}", f"127.0.0.1:{port}"]
+    auths += [a for a in _EXTRA_AUTHORITIES if a not in auths]
+    return "(?:" + "|".join(re.escape(a) for a in auths) + ")"
+
 
 def extract_session_id(omnibox_value: str, port: int) -> str | None:
     """从地址栏文本里提取 kimi web 会话 id；不是 kimi web 会话页则返回 None。
@@ -43,9 +64,7 @@ def extract_session_id(omnibox_value: str, port: int) -> str | None:
     """
     if not omnibox_value:
         return None
-    m = re.search(
-        rf"(?:localhost|127\.0\.0\.1):{port}/sessions/([\w-]+)", omnibox_value
-    )
+    m = re.search(rf"{_authority_alt(port)}/sessions/([\w-]+)", omnibox_value)
     return m.group(1) if m else None
 
 
@@ -59,9 +78,7 @@ def classify_omnibox(omnibox_value: str, port: int) -> tuple[str, str | None]:
     sid = extract_session_id(omnibox_value, port)
     if sid:
         return "session", sid
-    if omnibox_value and re.search(
-        rf"(?:localhost|127\.0\.0\.1):{port}(?:/|$)", omnibox_value
-    ):
+    if omnibox_value and re.search(rf"{_authority_alt(port)}(?:/|$)", omnibox_value):
         return "home", None
     return "away", None
 

@@ -25,7 +25,13 @@ from pathlib import Path
 import webview
 
 from envutil import bridge_dir, project_root
-from winstyle import bring_to_front, centered_position, style_window
+from winstyle import (
+    bring_to_front,
+    centered_position,
+    set_app_user_model_id,
+    set_window_icon,
+    style_window,
+)
 from runtime_state import (
     CLOSE_QUIT,
     PANEL_MUTEX,
@@ -190,6 +196,7 @@ class Panel:
         self.window.events.closing += self._on_closing
         self.window.events.shown += lambda: (
             style_window("MicToAgent"),
+            set_window_icon("MicToAgent", str(PROJ / "voice-assistant.ico")),
             bring_to_front("MicToAgent"),  # 被启动器拉起时跳到最前
         )
 
@@ -223,6 +230,7 @@ class Panel:
 
 def main() -> None:
     global _MUTEX
+    set_app_user_model_id("MicToAgent.VoiceAssistant")
     _MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False, PANEL_MUTEX)
     if ctypes.windll.kernel32.GetLastError() == 183:
         request_panel_show()

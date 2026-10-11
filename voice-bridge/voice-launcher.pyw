@@ -39,7 +39,13 @@ from pathlib import Path
 import webview
 
 from envutil import bridge_dir, project_root
-from winstyle import bring_to_front, centered_position, style_window
+from winstyle import (
+    bring_to_front,
+    centered_position,
+    set_app_user_model_id,
+    set_window_icon,
+    style_window,
+)
 
 BASE = bridge_dir()                              # voice-bridge 目录
 PROJ = project_root()                            # 项目根（.venv / logs 所在）
@@ -249,6 +255,7 @@ class LauncherWindow:
         self.window.events.closing += self._closing
         self.window.events.shown += lambda: (
             style_window(WIN_TITLE),
+            set_window_icon(WIN_TITLE, str(PROJ / "voice-assistant.ico")),
             bring_to_front(WIN_TITLE),  # 启动时跳到最前让用户看到进度
             # WebView2 初始化可能把窗口重新压下去，延时再抬一次保险
             threading.Timer(0.6, lambda: bring_to_front(WIN_TITLE)).start(),
@@ -386,6 +393,7 @@ def _spawn_resident(script: str, out_name: str, err_name: str, cwd=None):
 
 
 def main():
+    set_app_user_model_id("MicToAgent.VoiceAssistant")
     if "--stop" in sys.argv:
         from runtime_state import clear_stop_cmd, request_full_stop
         request_full_stop()

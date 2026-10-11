@@ -7,7 +7,8 @@ PostprocessHotwordMatcher（pypinyin + rapidfuzz）。
 覆盖：
 - 300ms 静音软切增量识别、1200ms 宽限（覆盖软切停顿期）、宽限内续话前缀保留、片段按序拼接
 - dual 双引擎接力：初稿/精修任务路由、续话触发精修、精修覆盖暂存文本、
-  提交屏障只等初稿不等在途精修、按住说话除最后一片外都排精修
+  提交屏障只等初稿不等在途精修、按住说话除最后一片外都排精修、
+  空/退化精修不覆盖初稿、超长片段（>refine_max_sec）不排精修
 - flush 提交屏障（等本轮片段到齐再发）、整轮作废（死 turn 结果丢弃 + purge）
 - 关门 flush 立即切段提交（跳过宽限）、按住说话切分识别但松手才提交
 - gate "0" 丢弃音频（音频回调）、过短语音段丢弃、续段阈值放宽
@@ -445,6 +446,53 @@ def test_dual_hold_refines_all_but_last_chunk(dual_env):
     assert e.sent == ["按住前半精修后半"]
 
 
+def test_dual_empty_refine_keeps_draft(dual_env):
+    """qwen3 精修返回空串（失败/超 max_total_len 生成为空）不得抹掉
+    已回流的好初稿——热词表超预算时每次精修都是空串，无此防御长句
+    只剩最后一片。"""
+    e = dual_env
+    feed(e, speech=20, silence=16)
+    e.seg.on_recog_result(1, 0, "draft", "前半初稿")
+    feed(e, speech=8, silence=16)               # 续话（排精修）→ 软切片段 1
+    assert e.kinds == ["draft", "refine", "draft"]
+    e.seg.on_recog_result(1, 0, "refine", "")   # 空精修：保留初稿
+    e.seg.on_recog_result(1, 1, "draft", "后半")
+    e.clock.advance(1.6)
+    e.seg.poll()
+    assert e.sent == ["前半初稿后半"]
+
+
+def test_dual_degenerate_refine_keeps_draft(dual_env):
+    """精修文本异常短于初稿视为退化（qwen3 超 max_total_len 截断音频后的
+    典型症状：几十秒初稿被"精修"成一个词，实测输出过 "language"），
+    不覆盖初稿。"""
+    e = dual_env
+    feed(e, speech=20, silence=16)
+    e.seg.on_recog_result(1, 0, "draft", "这是一段很长很长的初稿文本，有几十个字")
+    feed(e, speech=8, silence=16)               # 续话（排精修）→ 软切片段 1
+    assert e.kinds == ["draft", "refine", "draft"]
+    e.seg.on_recog_result(1, 0, "refine", "language")   # 退化精修：保留初稿
+    e.seg.on_recog_result(1, 1, "draft", "后半")
+    e.clock.advance(1.6)
+    e.seg.poll()
+    assert e.sent == ["这是一段很长很长的初稿文本，有几十个字后半"]
+
+
+def test_dual_long_chunk_skips_refine(dual_env):
+    """超过 refine_max_sec（默认 25s）的片段不排 qwen3 精修（音频 13 token/秒，
+    超 ~30s 必超 max_total_len=512 被截断退化），直接用初稿。"""
+    e = dual_env
+    feed(e, speech=800, silence=16)             # ~25.8s 片段 0（含 pad）
+    assert e.kinds == ["draft"]
+    feed(e, speech=8, silence=16)               # 续话确认 + 软切片段 1
+    assert e.kinds == ["draft", "draft"]        # 片段 0 超长，不排精修
+    e.seg.on_recog_result(1, 0, "draft", "长片段初稿")
+    e.seg.on_recog_result(1, 1, "draft", "后半")
+    e.clock.advance(1.6)
+    e.seg.poll()
+    assert e.sent == ["长片段初稿后半"]
+
+
 def test_audio_callback_discards_when_gate_closed(env):
     import queue as q
     frames = q.Queue()
@@ -844,8 +892,8 @@ def test_recognizer_survives_model_failure(core, monkeypatch):
 
 
 def test_recognizer_dual_routes_draft_and_refine(core, monkeypatch):
-    """dual 引擎：draft 走 SenseVoice 构造入口，refine 走 qwen3_asr（热词串
-    只传给 qwen3），结果带 kind 回流。"""
+    """dual 引擎：draft 走 SenseVoice 构造入口，refine 走 qwen3_asr，
+    结果带 kind 回流。"""
     import queue as q
 
     made = {}
@@ -887,7 +935,7 @@ def test_recognizer_dual_routes_draft_and_refine(core, monkeypatch):
 
 
 def test_stt_engine_selects_sherpa_engine(core, monkeypatch):
-    """stt_engine="qwen3_asr"（单引擎模式）走 sherpa 构造入口，热词串传给构造参数。"""
+    """stt_engine="qwen3_asr"（单引擎模式）走 sherpa 构造入口。"""
     import queue as q
 
     made = {}
@@ -907,36 +955,7 @@ def test_stt_engine_selects_sherpa_engine(core, monkeypatch):
     rec.start()
     assert rec.ready.wait(timeout=10)   # 构造发生在 ready 之前
     assert made["num_threads"] == 2
-    assert made["hotwords"] == ""       # 无热词表 → 空串
-
-
-def test_qwen3_bias_hotwords_from_file(core, monkeypatch, tmp_path):
-    """qwen3_asr 的解码偏置热词串：纯热词 + 显式映射 X=>Y 的 Y 侧，逗号分隔。"""
-    import queue as q
-
-    hw = tmp_path / "hotwords.txt"
-    hw.write_text("# 注释\n会话\n工作区\nchemicde=>kimi code\nf九=>F9\n",
-                  encoding="utf-8")
-    # 收集函数本身：纯热词原样、映射取 Y 侧、注释跳过、去重保序
-    assert core.collect_bias_hotwords([str(hw)]) == "会话,工作区,kimi code,F9"
-
-    made = {}
-
-    def _ctor(**kw):
-        made.update(kw)
-        stream = SimpleNamespace(accept_waveform=lambda sr, s: None,
-                                 result=SimpleNamespace(text=""))
-        return SimpleNamespace(create_stream=lambda: stream,
-                               decode_stream=lambda s: None)
-
-    monkeypatch.setitem(sys.modules, "sherpa_onnx", SimpleNamespace(
-        OfflineRecognizer=SimpleNamespace(from_qwen3_asr=_ctor)))
-    cfg = dict(core.CORE_DEFAULTS, stt_engine="qwen3_asr")
-    rec = core.Recognizer({"core": cfg}, core.HotwordCorrector([]), q.Queue(),
-                          hotword_paths=[str(hw)])
-    rec.start()
-    assert rec.ready.wait(timeout=10)
-    assert made["hotwords"] == "会话,工作区,kimi code,F9"
+    assert "hotwords" not in made       # 解码偏置已移除，不传热词参数
 
 
 def test_normalize_stt_text_cjk_space(core):

@@ -148,3 +148,43 @@ def bring_to_front(title: str) -> None:
                 _u32.AttachThreadInput(tid_cur, tid_fg, False)
     except Exception:
         pass
+
+
+_WM_SETICON = 0x0080
+_IMAGE_ICON = 1
+_LR_LOADFROMFILE = 0x00000010
+
+
+def set_window_icon(title: str, ico_path: str) -> None:
+    """显式给无边框 pywebview 窗口设图标（任务栏 / Alt+Tab 用）。
+
+    frameless 窗口（FormBorderStyle.None）没有标题栏，WinForms 不会把
+    Form.Icon 写到窗口 HICON 上，任务栏回退成 pythonw.exe 默认图标。
+    直接对 hwnd 发 WM_SETICON 不受边框样式影响。图标句柄随进程生命周期
+    持有，无需 DestroyIcon（进程退出即释放）。
+    """
+    try:
+        hwnd = _find_form(title)
+        if not hwnd:
+            return
+        _u32.LoadImageW.restype = wintypes.HANDLE
+        _u32.LoadImageW.argtypes = [
+            wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT,
+        ]
+        for which, size in ((0, 16), (1, 32)):  # ICON_SMALL / ICON_BIG
+            hicon = _u32.LoadImageW(
+                None, str(ico_path), _IMAGE_ICON, size, size, _LR_LOADFROMFILE
+            )
+            if hicon:
+                _u32.SendMessageW(hwnd, _WM_SETICON, which, hicon)
+    except Exception:
+        pass
+
+
+def set_app_user_model_id(appid: str) -> None:
+    """给进程设 AppUserModelID，让任务栏把语音助手各窗口归组为同一应用。"""
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(str(appid))
+    except Exception:
+        pass

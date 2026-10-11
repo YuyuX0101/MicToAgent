@@ -17,7 +17,10 @@ Copyright 2026 MicToAgent contributors（本文件为 MicToAgent 原创）
 qwen3-asr 精修任务，精修结果覆盖内部暂存文本（不可见，不动已提交内容）。
 提交屏障只等初稿——宽限到期/松手即发，不等在途精修（迟到的精修按死
 turn 丢弃）。净效果：除最后一片外多为 qwen3 质量，最后一片永远是
-SenseVoice 初稿，提交零等待。
+SenseVoice 初稿，提交零等待。qwen3 精修有片段长度上限
+（core.refine_max_sec，默认 25s）：音频按 13 token/秒进
+max_total_len=512 的 KV，超限 sherpa 截断音频、生成退化文本（实测 40s
+片段输出只剩 "language"）；超限片段和疑似退化的精修结果都保留初稿。
 
 线程模型：
   [音频回调]  只把帧丢进队列（关门时直接丢弃），不做任何重活
@@ -94,6 +97,7 @@ CORE_DEFAULTS = {
     "min_speech_continuation_ms": 192,
     "speech_pad_ms": 500,
     "reopen_grace_ms": 1200,
+    "refine_max_sec": 25,          # qwen3 精修片段时长上限（音频 13 token/秒，超 ~30s 必超 max_total_len=512）
     "post_timeout_sec": 120,
 }
 
@@ -173,32 +177,6 @@ _CJK_ADJACENT_SPACE = re.compile(r"\s+(?=[一-鿿])|(?<=[一-鿿])\s+")
 def normalize_stt_text(text: str) -> str:
     """识别文本归一化：只去掉与 CJK 相邻的空格，英文词间空格保留。"""
     return _CJK_ADJACENT_SPACE.sub("", text.strip())
-
-
-def collect_bias_hotwords(paths: list) -> str:
-    """qwen3-asr 解码偏置热词串（构造参数，逗号分隔）：纯热词 + 显式映射的
-    目标侧（X=>Y 的 Y）。文件不存在/不可读时按空词表处理。"""
-    words: list = []
-    for path in paths:
-        try:
-            with open(path, encoding="utf-8") as f:
-                lines = f.readlines()
-        except OSError as exc:
-            logger.warning("热词表文件不可读，跳过: %s (%s)", path, exc)
-            continue
-        for line in lines:
-            word = line.strip()
-            if not word or word.startswith("#"):
-                continue
-            for sep in _EXPLICIT_SEPARATORS:
-                if sep in word:
-                    right = word.split(sep, 1)[1].strip()
-                    if right:
-                        words.append(right)
-                    break
-            else:
-                words.append(word)
-    return ",".join(dict.fromkeys(words))   # 去重保序
 
 
 def parse_hotword_files(paths: list) -> tuple[dict, list]:
@@ -456,12 +434,17 @@ class Segmenter:
     片段排精修任务（refine，qwen3）——刚切的这片是不是最后一片还不知道，
     等续话确认再补。精修结果只覆盖暂存文本，提交屏障（_all_chunks_done）
     只等初稿，不等在途精修。
+    qwen3 精修有长度上限（refine_max_sec，默认 25s）：音频按 13 token/秒
+    编码进 max_total_len=512 的 KV，超限 sherpa 会截断音频、生成退化文本
+    （实测 40s 片段输出只剩 "language" 一个词）；超限片段不排精修，
+    保留 SenseVoice 初稿。精修文本异常短于初稿（<50%）也视为退化，不覆盖。
     """
 
     def __init__(self, gate_value, speak, vad, submit_recog, send, *,
                  purge_recog=None, dual=False,
                  min_speech_ms=384, min_speech_continuation_ms=192,
                  speech_pad_ms=500, reopen_grace_ms=1500, min_silence_ms=300,
+                 refine_max_sec=25,
                  clock=time.monotonic):
         self._gate_value = gate_value
         self._speak = speak
@@ -470,6 +453,7 @@ class Segmenter:
         self._purge_recog = purge_recog or (lambda turn_id: None)
         self._send = send
         self._dual = dual
+        self._refine_max_samples = refine_max_sec * SAMPLE_RATE
         self._clock = clock
         self._min_speech_frames = max(1, min_speech_ms // FRAME_MS)
         self._min_continuation_frames = max(1, min_speech_continuation_ms // FRAME_MS)
@@ -545,13 +529,28 @@ class Segmenter:
                         text: str) -> None:
         """识别结果回流（主循环调用）：回合已关闭/作废的按 turn_id 丢弃。
         dual 模式：初稿（draft）填充暂存文本并计入提交屏障；精修（refine）
-        只覆盖暂存文本，不影响屏障；精修已覆盖的片段忽略迟到的初稿
+        只覆盖暂存文本，不影响屏障，空精修不覆盖（防 qwen3 失败抹掉初稿）；
+        精修已覆盖的片段忽略迟到的初稿
         （单线程 FIFO 下初稿必先于精修回流，这只是防御）。"""
         if turn_id != self._turn_id or not self._turn_open:
             logger.info("丢弃过期识别结果（turn %d 片段 #%d，当前 turn %d）",
                         turn_id, chunk_idx, self._turn_id)
             return
         if kind == "refine":
+            if not text:
+                # 空精修（qwen3 失败）不得抹掉已回流的好初稿
+                logger.warning("精修结果为空，保留初稿（turn %d 片段 #%d）",
+                               turn_id, chunk_idx)
+                return
+            draft = self._texts.get(chunk_idx, "")
+            if draft and len(text) < len(draft) * 0.5:
+                # 退化精修（qwen3 超 max_total_len 截断音频后的典型症状：
+                # 几十秒的初稿被"精修"成一个词，实测输出过 "language"）
+                logger.warning("精修疑似退化（%d 字 << 初稿 %d 字），保留初稿"
+                               "（turn %d 片段 #%d）: %s",
+                               len(text), len(draft), turn_id, chunk_idx,
+                               text[:30])
+                return
             self._refined.add(chunk_idx)
             self._drafts_done.add(chunk_idx)     # 防御：精修到 = 这片已有文本
             self._texts[chunk_idx] = text
@@ -576,6 +575,15 @@ class Segmenter:
                 continue
             self._refine_submitted.add(i)
             audio = self._chunk_audio[i]
+            if len(audio) > self._refine_max_samples:
+                # qwen3 音频按 13 token/秒进 max_total_len=512 的 KV，
+                # 超限 sherpa 截断音频、生成退化——长片段直接用初稿
+                logger.info("片段 #%d 超长（%.1fs > %ds），不排精修，保留初稿"
+                            "（turn %d）",
+                            i, len(audio) / SAMPLE_RATE,
+                            self._refine_max_samples // SAMPLE_RATE,
+                            self._turn_id)
+                continue
             self._submit_recog(self._turn_id, i, audio, "refine")
             logger.info("片段 #%d 送精修（%.1fs，turn %d）",
                         i, len(audio) / SAMPLE_RATE, self._turn_id)
@@ -672,9 +680,8 @@ class Segmenter:
 
 # ---------- 识别与发送线程 ----------
 
-def _load_sherpa_recognizer(engine: str, num_threads: int, hotwords: str = ""):
-    """构造 sherpa-onnx OfflineRecognizer（离线、int8 模型，CPU，路径相对项目根写死）。
-    hotwords 是逗号分隔的解码偏置词串（构造参数，换热词需重建实例）。"""
+def _load_sherpa_recognizer(engine: str, num_threads: int):
+    """构造 sherpa-onnx OfflineRecognizer（离线、int8 模型，CPU，路径相对项目根写死）。"""
     import sherpa_onnx
     if engine == "qwen3_asr":
         return sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
@@ -682,14 +689,12 @@ def _load_sherpa_recognizer(engine: str, num_threads: int, hotwords: str = ""):
             encoder=str(QWEN3_ASR_DIR / "encoder.int8.onnx"),
             decoder=str(QWEN3_ASR_DIR / "decoder.int8.onnx"),
             tokenizer=str(QWEN3_ASR_DIR / "tokenizer"),
-            num_threads=num_threads, max_new_tokens=512,
-            hotwords=hotwords)
+            num_threads=num_threads, max_new_tokens=512)
     raise ValueError(f"未知 stt_engine: {engine}")
 
 
 def _load_sense_voice_recognizer(num_threads: int):
-    """SenseVoice-Small（int8）：dual 接力模式的初稿引擎（快，RTF≈0.03）。
-    无热词偏置能力，误听靠第二层事后纠错兜底。"""
+    """SenseVoice-Small（int8）：dual 接力模式的初稿引擎（快，RTF≈0.03）。"""
     import sherpa_onnx
     return sherpa_onnx.OfflineRecognizer.from_sense_voice(
         model=str(SENSE_VOICE_DIR / "model.int8.onnx"),
@@ -716,18 +721,17 @@ class Recognizer(threading.Thread):
     (turn_id, chunk_idx, kind, text) 回流。整轮作废走 purge(turn_id)：
     清掉队列里该轮未做的任务（在途那个做完照常回流，由分段器按死 turn 丢弃）。
 
-    热词双层：第一层解码偏置仅 qwen3_asr 生效（构造参数；dual 模式只挂在
-    精修引擎上），hotwords.txt 的 mtime 变了就在识别线程里重建实例
-    （~3.5s，重建期间新任务排队等待）；第二层事后纠错（HotwordCorrector）
-    对全部引擎、每个片段结果生效。"""
+    热词纠错只有事后一层（HotwordCorrector，显式映射 + 拼音同音，全量
+    词表、热更新），对全部引擎、每个片段结果生效。qwen3 的解码偏置热词
+    已移除：偏置词是 prompt 前缀，占用 max_total_len=512 的模型硬上限，
+    词表增长曾让 prompt 超限、生成必然为空、静默丢字；纠错收益主要在
+    中文同音词，恰是事后纠错的主场，故只保留这一层。"""
 
-    def __init__(self, cfg, corrector, result_queue: queue.Queue,
-                 hotword_paths=()):
+    def __init__(self, cfg, corrector, result_queue: queue.Queue):
         super().__init__(daemon=True, name="voice-core-stt")
         self._cfg = cfg
         self._corrector = corrector
         self._result_queue = result_queue   # 结果以 (turn_id, chunk_idx, kind, text) 回流
-        self._hotword_paths = [str(p) for p in hotword_paths]
         self._queue = queue.Queue()
         self.ready = threading.Event()
 
@@ -746,10 +750,6 @@ class Recognizer(threading.Thread):
                 logger.info("识别队列清理：丢弃 turn %d 的 %d 个未做任务",
                             turn_id, dropped)
 
-    def _hotword_sig(self) -> tuple:
-        return tuple(os.path.getmtime(p) if os.path.isfile(p) else None
-                     for p in self._hotword_paths)
-
     def run(self) -> None:
         core = self._cfg["core"]
         engine = core.get("stt_engine", "dual")
@@ -758,39 +758,22 @@ class Recognizer(threading.Thread):
             raise ValueError(f"未知 stt_engine: {engine}")
         logger.info("[stt] loading engine=%s ...", engine)
         t0 = time.monotonic()
-        hotwords = collect_bias_hotwords(self._hotword_paths)
         recs = {}
         if engine == "dual":
             recs["draft"] = _load_sense_voice_recognizer(num_threads)
-            recs["refine"] = _load_sherpa_recognizer("qwen3_asr", num_threads,
-                                                     hotwords)
+            recs["refine"] = _load_sherpa_recognizer("qwen3_asr", num_threads)
         else:
-            recs["final"] = _load_sherpa_recognizer(engine, num_threads,
-                                                    hotwords)
+            recs["final"] = _load_sherpa_recognizer(engine, num_threads)
         logger.info("[stt] engine ready (%.1fs), warming up",
                     time.monotonic() - t0)
-        if hotwords:
-            logger.info("[stt] 解码偏置热词 %d 条", hotwords.count(",") + 1)
         # 预热推理（32ms 静音即可，只为触发图构建/内存分配）
         for rec in recs.values():
             _sherpa_infer(rec, np.zeros(BLOCKSIZE, dtype=np.float32))
-        hw_sig = self._hotword_sig()
         self.ready.set()
         logger.info("语音识别模型就绪")
         while True:
             turn_id, chunk_idx, kind, audio = self._queue.get()  # 按序全做，不丢任务
             self._corrector.reload_if_changed()
-            # qwen3 热词热更新：词表 mtime 变了就重建 qwen3 实例
-            # （~3.5s，单线程内原地重建，期间新任务排队等待）；
-            # dual 模式只重建精修引擎，SenseVoice 无热词偏置能力
-            sig = self._hotword_sig()
-            if sig != hw_sig:
-                logger.info("[stt] 热词表已变更，重建 qwen3_asr 实例…")
-                recs["refine" if engine == "dual" else "final"] = \
-                    _load_sherpa_recognizer(
-                        "qwen3_asr", num_threads,
-                        collect_bias_hotwords(self._hotword_paths))
-                hw_sig = sig
             # dual：draft→SenseVoice，refine→qwen3；意外 kind 兜底到 qwen3
             rec = recs.get(kind) or recs.get("refine") or recs["final"]
             t0 = time.monotonic()
@@ -803,6 +786,12 @@ class Recognizer(threading.Thread):
                 logger.exception("识别失败，该片段按空结果回流（turn %d 片段 #%d）",
                                  turn_id, chunk_idx)
                 text = ""
+            if kind == "refine" and not text and len(audio) >= SAMPLE_RATE:
+                # sherpa 侧失败只往 stderr 打 C++ 日志，这里给一个明确的
+                # 中文警告（历史上 qwen3 静默生成为空曾导致长句丢字）
+                logger.warning("qwen3 精修生成为空（%.1fs 音频）——"
+                               "检查音频是否过长或模型是否异常",
+                               len(audio) / SAMPLE_RATE)
             label = {"draft": "初稿", "refine": "精修"}.get(kind, "识别")
             logger.info("%s完成（turn %d 片段 #%d，%.1fs 音频，耗时 %.1fs）: %s",
                         label, turn_id, chunk_idx, len(audio) / SAMPLE_RATE,
@@ -896,11 +885,9 @@ def main() -> None:
 
     # hotwords.txt 不存在也传路径：mtime 签名变化（None→存在）会被热更新
     # 机制捕获，以后新建词表下一次识别即生效，不用重启
-    hotword_paths = [HOTWORD_FILE]
-    corrector = HotwordCorrector(hotword_paths)
+    corrector = HotwordCorrector([HOTWORD_FILE])
     recog_results = queue.Queue()
-    recognizer = Recognizer(cfg, corrector, recog_results,
-                            hotword_paths=hotword_paths)
+    recognizer = Recognizer(cfg, corrector, recog_results)
     recognizer.start()              # 先起识别线程（模型加载耗时最长）
 
     vad = VadEngine(threshold=core["vad_threshold"],
@@ -916,6 +903,7 @@ def main() -> None:
         speech_pad_ms=core["speech_pad_ms"],
         reopen_grace_ms=core["reopen_grace_ms"],
         min_silence_ms=core["min_silence_ms"],
+        refine_max_sec=core["refine_max_sec"],
     )
     sender.start()
 
