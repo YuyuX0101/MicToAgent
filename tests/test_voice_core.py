@@ -478,6 +478,22 @@ def test_dual_degenerate_refine_keeps_draft(dual_env):
     assert e.sent == ["这是一段很长很长的初稿文本，有几十个字后半"]
 
 
+def test_dual_degenerate_refine_rejected_with_empty_draft(dual_env):
+    """初稿为空（SenseVoice 失败按空串回流）时，初稿比例判定失效，
+    时长下限（片段内停顿 <300ms、语音近乎连续，每秒 ≥1.5 字）仍能
+    拦截退化精修——否则 "language" 会被当成该片段的正式文本提交。"""
+    e = dual_env
+    feed(e, speech=400, silence=16)             # ~13s 片段 0（含 pad）
+    e.seg.on_recog_result(1, 0, "draft", "")    # 初稿失败为空
+    feed(e, speech=8, silence=16)               # 续话（排精修）→ 软切片段 1
+    assert e.kinds == ["draft", "refine", "draft"]
+    e.seg.on_recog_result(1, 0, "refine", "language")   # 8 字 << 13s×1.5
+    e.seg.on_recog_result(1, 1, "draft", "后半")
+    e.clock.advance(1.6)
+    e.seg.poll()
+    assert e.sent == ["后半"]                   # 退化精修被拦截
+
+
 def test_dual_long_chunk_skips_refine(dual_env):
     """超过 refine_max_sec（默认 25s）的片段不排 qwen3 精修（音频 13 token/秒，
     超 ~30s 必超 max_total_len=512 被截断退化），直接用初稿。"""
@@ -744,6 +760,48 @@ def test_correct_text_is_untouched(corrector):
 def test_near_homophone_is_not_overcorrected(corrector):
     # 「区下」(quxia) 与「取消」(quxiao) 拼音相近但不相同，阈值 1.0 下不得误改
     assert corrector.apply("工作区下有几个会话") == "工作区下有几个会话"
+
+
+def test_syllable_boundary_is_not_overcorrected(core, tmp_path):
+    # 「连」(lian) 与「立案」(li-an) 拼接拼音相同但音节数不同，不得互相替换；
+    # 同音节数的真同音（利安 → 立案）仍要纠正；已正确的「立案。」不得被吞标点。
+    pytest.importorskip("pypinyin")
+    pytest.importorskip("rapidfuzz")
+    p = tmp_path / "hotwords.txt"
+    p.write_text("立案\n", encoding="utf-8")
+    c = core.HotwordCorrector([str(p)])
+    c.reload_if_changed()
+    assert c.apply("我经常说连接和连网") == "我经常说连接和连网"
+    assert c.apply("先去利安再回来") == "先去立案再回来"
+    assert c.apply("已经立案。下一步") == "已经立案。下一步"
+
+
+# ---------- 语气词与口吃清理 ----------
+
+def test_filler_words_removed(core):
+    f = core._cleanup_fillers
+    assert f("呃，我这一长段话有几个要求", ["呃"]) == "我这一长段话有几个要求"
+    assert f("配置。呃，华为的笔记本", ["呃"]) == "配置。华为的笔记本"
+    assert f("呃", ["呃"]) == ""
+    assert f("呃呃，那个功能", ["呃"]) == "那个功能"
+    assert f("已经立案。呃。", ["呃"]) == "已经立案。"
+    assert f("没有语气词的句子", ["呃"]) == "没有语气词的句子"
+
+
+def test_stutter_collapsed(core):
+    f = core._cleanup_fillers
+    assert f("这应该可以通过通过呃通过代码实现", ["呃"]) == "这应该可以通过代码实现"
+    assert f("我呃我觉得可以", ["呃"]) == "我觉得可以"
+    assert f("通过通过通过", ["呃"]) == "通过"
+
+
+def test_legit_reduplication_kept(core):
+    f = core._cleanup_fillers
+    assert f("谢谢你的帮助", ["呃"]) == "谢谢你的帮助"
+    assert f("我们研究研究再说", ["呃"]) == "我们研究研究再说"
+    # 纯相邻 2 连且无语气词：保守不动
+    assert f("我我想想", ["呃"]) == "我我想想"
+    assert f("哈哈哈", ["呃"]) == "哈哈哈"
 
 
 def test_hotword_file_hot_reload(core, corrector, hotword_file):

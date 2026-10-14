@@ -98,6 +98,7 @@ CORE_DEFAULTS = {
     "speech_pad_ms": 500,
     "reopen_grace_ms": 1200,
     "refine_max_sec": 25,          # qwen3 精修片段时长上限（音频 13 token/秒，超 ~30s 必超 max_total_len=512）
+    "filler_words": ["呃"],        # 语气词清理词表（纯规则删除 + 口吃折叠）；嗯/啊/那个/就是语义风险高，别轻易加
     "post_timeout_sec": 120,
 }
 
@@ -221,7 +222,10 @@ class HotwordCorrector:
     （改完 hotwords.txt 不用重启，下一次识别即生效）。
 
     阈值固定 1.0（纯同音才替换）：模糊窗口允许目标长度 ±1，阈值放低会误改
-    （实测「区下」被改成「取消」、「的小说」被改成「小说」）。
+    （实测「区下」被改成「取消」、「的小说」被改成「小说」）。拼音按音节
+    加分隔符比对，音节结构不同的词不算同音（连 lian ≠ 立案 li-an）。
+    阈值 1.0 下 matcher 走拼音键字典查表（精确路径），纠错耗时与词表
+    规模脱钩（实测 214→2000 词均 ~80ms/次，192 字文本），词表随便涨。
     matcher 用的是 vendor 进来的 FunASR PostprocessHotwordMatcher（MIT），
     不再依赖 funasr 内部 API。"""
 
@@ -261,6 +265,48 @@ class HotwordCorrector:
             logger.info("热词纠错: %s -> %s (%s)", text, corrected,
                         [(m.original, m.replacement) for m in matches])
         return corrected
+
+
+# ---------- 语气词与口吃清理 ----------
+
+def _cleanup_fillers(text: str, fillers) -> str:
+    """去掉语气词（默认只删「呃」）和口吃重复，纯规则无模型。
+
+    两段式：先折叠口吃重复（同一 1~4 字片段被重复且中间夹了语气词，或
+    ≥2 字的片段连排 ≥3 次——「通过通过呃通过」→「通过」；纯相邻 2 连
+    不动，「谢谢」「研究研究」是合法叠词），再删残留语气词并收拾它
+    留下的标点（「。呃，」→「。」）。"""
+    if not text or not fillers:
+        return text
+    alt = "|".join(re.escape(f) for f in fillers if f)
+    if not alt:
+        return text
+    text = _collapse_stutters(text, alt)
+    # 语气词连同紧随的停顿标点一起删
+    text = re.sub(r"(?:%s)+[，。、！？…\s]*" % alt, "", text)
+    # 收拾残留：逗号紧贴句号类标点 → 留句号；连续逗号合并；句首标点删掉
+    text = re.sub(r"[，、]([。！？…])", r"\1", text)
+    text = re.sub(r"([。！？…])[，、]", r"\1", text)
+    text = re.sub(r"[，、]{2,}", "，", text)
+    return text.lstrip("，。、！？… ")
+
+
+def _collapse_stutters(text: str, filler_alt: str) -> str:
+    sep = r"(?:%s|[，、\s])*" % filler_alt
+    pat = re.compile(r"([一-鿿]{1,4})((?:%s)\1)+" % sep)
+
+    def repl(m):
+        token, run = m.group(1), m.group(0)
+        if re.fullmatch(r"(?:%s)+" % filler_alt, token):
+            return run  # 语气词自身连排（呃呃呃）交给语气词删除
+        seps = run.split(token)
+        count = len(seps) - 1
+        has_filler = any(re.search(filler_alt, s) for s in seps)
+        if has_filler or (count >= 3 and len(token) >= 2):
+            return token
+        return run
+
+    return pat.sub(repl, text)
 
 
 # ---------- VAD ----------
@@ -542,14 +588,19 @@ class Segmenter:
                 logger.warning("精修结果为空，保留初稿（turn %d 片段 #%d）",
                                turn_id, chunk_idx)
                 return
+            # 退化精修两道判据（qwen3 超 max_total_len 截断音频后的典型症状：
+            # 几十秒的初稿被"精修"成一个词，实测输出过 "language"）：
+            # 1) 时长下限——片段内停顿都 <300ms（否则已软切），语音近乎连续，
+            #    每秒至少约 1.5 字；与初稿质量无关（初稿为空/虚长都能兜住）；
+            # 2) 比初稿短一半以上——捕捉部分截断（只返回开头一段）。
+            # 误判的代价只是保留初稿，不会更糟，所以判据可以激进。
+            audio_sec = len(self._chunk_audio.get(chunk_idx, [])) / SAMPLE_RATE
             draft = self._texts.get(chunk_idx, "")
-            if draft and len(text) < len(draft) * 0.5:
-                # 退化精修（qwen3 超 max_total_len 截断音频后的典型症状：
-                # 几十秒的初稿被"精修"成一个词，实测输出过 "language"）
-                logger.warning("精修疑似退化（%d 字 << 初稿 %d 字），保留初稿"
-                               "（turn %d 片段 #%d）: %s",
-                               len(text), len(draft), turn_id, chunk_idx,
-                               text[:30])
+            if len(text) < audio_sec * 1.5 or (draft and len(text) < len(draft) * 0.5):
+                logger.warning("精修疑似退化（%d 字，音频 %.1fs，初稿 %d 字），"
+                               "保留初稿（turn %d 片段 #%d）: %s",
+                               len(text), audio_sec, len(draft),
+                               turn_id, chunk_idx, text[:30])
                 return
             self._refined.add(chunk_idx)
             self._drafts_done.add(chunk_idx)     # 防御：精修到 = 这片已有文本
@@ -780,6 +831,10 @@ class Recognizer(threading.Thread):
             try:
                 text = _sherpa_infer(rec, audio)
                 text = self._corrector.apply(text)
+                cleaned = _cleanup_fillers(text, core.get("filler_words") or [])
+                if cleaned != text:
+                    logger.info("语气词清理: %s -> %s", text, cleaned)
+                text = cleaned
             except Exception:
                 # 识别失败不能让线程死掉（否则之后所有语音都静默丢失）：
                 # 该片段按空串回流，拼接时自然跳过
@@ -857,14 +912,22 @@ class Sender(threading.Thread):
 
 def make_audio_callback(gate_value, frame_queue):
     """sounddevice 回调：关门（gate "0"）直接丢弃音频；开门只把帧丢进队列，
-    不做任何重活（实时回调里不能阻塞）。"""
+    不做任何重活（实时回调里不能阻塞）。
+    队列满（主循环掉队超 ~9.6s，系统卡顿/占满 CPU 时可能触发）必须打日志：
+    丢帧 = 话中间丢字，静默丢弃会让排查无门。"""
+    dropped = 0
+
     def callback(indata, frames, time_info, status):
+        nonlocal dropped
         if gate_value() == "0":
             return
         try:
             frame_queue.put_nowait(indata[:, 0].copy())
         except queue.Full:
-            pass
+            dropped += 1
+            if dropped % 32 == 1:   # 每丢约 1s 报一次，不刷屏
+                logger.warning("音频队列已满，正在丢帧（累计 %d 帧）——"
+                               "主循环跟不上，语音会丢字", dropped)
     return callback
 
 

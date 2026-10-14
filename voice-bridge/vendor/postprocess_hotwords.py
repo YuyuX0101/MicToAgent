@@ -76,7 +76,9 @@ def _require_rapidfuzz():
 
 def _to_pinyin_key(text: str) -> str:
     lazy_pinyin, style = _require_pypinyin()
-    return "".join(lazy_pinyin(text, style=style.NORMAL, errors="ignore")).lower()
+    # 音节间保留分隔符：连(lian) 与 立案(li-an) 拼接拼音相同但音节结构不同，
+    # 不加分隔符会在阈值 1.0 下互相误改。
+    return "-".join(lazy_pinyin(text, style=style.NORMAL, errors="ignore")).lower()
 
 
 def _parse_line(line: str) -> Tuple[Optional[str], Optional[str], bool]:
@@ -231,13 +233,24 @@ class PostprocessHotwordMatcher:
                 self.fuzzy_targets.append(target_s)
 
         self._length_buckets: Dict[int, List[Tuple[str, str]]] = {}
+        self._exact_index: Optional[Dict[str, List[str]]] = None
         self._fuzz = None
         if self.fuzzy_targets and self.enable_fuzzy:
-            self._fuzz = _require_rapidfuzz()
             _require_pypinyin()
             for target in self.fuzzy_targets:
                 bucket = self._length_buckets.setdefault(len(target), [])
                 bucket.append((target, _to_pinyin_key(target)))
+            if self.threshold >= 1.0:
+                # 阈值 1.0 时只有拼音键完全相等才命中，逐目标 fuzz 比较退化为
+                # 字典查表：耗时与词表规模脱钩（实测 214 词 192 字文本
+                # 452ms/次 → 个位数 ms），词表随便涨不影响识别速度。
+                # 且 ±1 窗口在等键前提下只差标点（会被剥标点跳过），
+                # 所以精确模式只扫与目标等长的窗口。
+                self._exact_index = {}
+                for target in self.fuzzy_targets:
+                    self._exact_index.setdefault(_to_pinyin_key(target), []).append(target)
+            else:
+                self._fuzz = _require_rapidfuzz()
 
     def apply_text(self, text: str) -> Tuple[str, List[HotwordMatch]]:
         if not text:
@@ -306,6 +319,8 @@ class PostprocessHotwordMatcher:
         return updated
 
     def _apply_fuzzy(self, text: str) -> Tuple[str, List[HotwordMatch]]:
+        if self._exact_index is not None:
+            return self._apply_fuzzy_exact(text)
         assert self._fuzz is not None
         candidates: List[HotwordMatch] = []
 
@@ -334,7 +349,8 @@ class PostprocessHotwordMatcher:
 
                 for length in bucket_keys:
                     for target, target_py in self._length_buckets[length]:
-                        if segment == target:
+                        # 剥掉标点后与目标相同则跳过（避免「立案。」→「立案」吞标点）
+                        if "".join(_TOKEN_PATTERN.findall(segment)) == target:
                             continue
                         score = self._fuzz.ratio(segment_py, target_py) / 100.0
                         if score >= self.threshold:
@@ -347,6 +363,49 @@ class PostprocessHotwordMatcher:
                                     end=end,
                                 )
                             )
+
+        if not candidates:
+            return text, []
+
+        selected = _select_non_overlapping(candidates)
+        updated = text
+        applied: List[HotwordMatch] = []
+        for match in sorted(selected, key=lambda m: m.start, reverse=True):
+            updated = updated[: match.start] + match.replacement + updated[match.end :]
+            applied.append(match)
+        applied.sort(key=lambda m: m.start)
+        return updated, applied
+
+    def _apply_fuzzy_exact(self, text: str) -> Tuple[str, List[HotwordMatch]]:
+        """阈值 1.0 的精确路径：等长窗口 + 拼音键字典查表，O(文本长 × 词长种类)。"""
+        assert self._exact_index is not None
+        candidates: List[HotwordMatch] = []
+        text_len = len(text)
+        py_cache: Dict[str, str] = {}
+
+        for win_len in sorted(self._length_buckets):
+            for start in range(0, text_len - win_len + 1):
+                end = start + win_len
+                segment = text[start:end]
+                if not segment or not _TOKEN_PATTERN.search(segment):
+                    continue
+                segment_py = py_cache.get(segment)
+                if segment_py is None:
+                    segment_py = _to_pinyin_key(segment)
+                    py_cache[segment] = segment_py
+                for target in self._exact_index.get(segment_py, ()):
+                    # 剥掉标点后与目标相同则跳过（避免「立案。」→「立案」吞标点）
+                    if "".join(_TOKEN_PATTERN.findall(segment)) == target:
+                        continue
+                    candidates.append(
+                        HotwordMatch(
+                            original=segment,
+                            replacement=target,
+                            score=1.0,
+                            start=start,
+                            end=end,
+                        )
+                    )
 
         if not candidates:
             return text, []

@@ -23,6 +23,7 @@
     "speech_pad_ms": 500,
     "reopen_grace_ms": 1200,
     "refine_max_sec": 25,
+    "filler_words": ["呃"],
     "post_timeout_sec": 120
   }
 }
