@@ -113,17 +113,17 @@ def _notify(text: str) -> None:
         logger.debug("系统通知失败: %s", e)
 
 
-async def _kimi_alive(client: httpx.AsyncClient) -> bool:
+async def _kimi_alive(client: httpx.AsyncClient, base: str) -> bool:
     try:
-        r = await client.get(f"{KIMI}/api/v1/healthz", timeout=3)
+        r = await client.get(f"{base}/api/v1/healthz", timeout=3)
         return r.status_code == 200
     except Exception:
         return False
 
 
-async def _send_prompt(client: httpx.AsyncClient, sid: str, text: str) -> str:
+async def _send_prompt(client: httpx.AsyncClient, base: str, sid: str, text: str) -> str:
     r = await client.post(
-        f"{KIMI}/api/v1/sessions/{sid}/prompts",
+        f"{base}/api/v1/sessions/{sid}/prompts",
         json={"content": [{"type": "text", "text": text}]},
         timeout=30,
     )
@@ -133,22 +133,23 @@ async def _send_prompt(client: httpx.AsyncClient, sid: str, text: str) -> str:
     return data.get("status", "running")
 
 
-# 盯梢去重：每个会话同一时刻最多一个后台盯梢任务，连续说多句话不会
-# 起一堆重复任务、也不会重复弹同一条拍板通知。_submit_seq 记录每个会话
-# 累计提交了几条语音指令，盯梢任务据此判断队列里还有没有新指令要盯。
-_submit_seq: dict[str, int] = {}
-_watchers: set[str] = set()
+# 盯梢去重：每个目标（base+会话）同一时刻最多一个后台盯梢任务，连续说多句
+# 话不会起一堆重复任务、也不会重复弹同一条拍板通知。_submit_seq 记录每个
+# 目标累计提交了几条语音指令，盯梢任务据此判断队列里还有没有新指令要盯。
+# 键是 (base, sid)：同一会话 id 可能分别出现在本机和远端 kimi web。
+_submit_seq: dict = {}
+_watchers: set = set()
 
 
 # ---------- 核心流程 ----------
 
 
-def _resolve_target() -> str | None:
-    """返回跟随到的会话 id；当前没选中任何会话时返回 None。
+def _resolve_target() -> tuple[str | None, str | None]:
+    """返回跟随到的 (base, 会话 id)；当前没选中任何会话时 sid 为 None。
     先同步刷新一次地址栏（约几十毫秒，UIA 是阻塞 COM 调用，调用方应用
     asyncio.to_thread 包住），保证刚切换会话就说话也命中。"""
     _resolver.refresh()
-    return _resolver.current()
+    return _resolver.current_target()
 
 
 def _normalize(text: str) -> str:
@@ -174,22 +175,23 @@ def _paste(text: str, submit: bool) -> str:
     return paste_into_composer(text, _resolver.port, submit=submit)
 
 
-def _arm_watcher(sid: str) -> None:
-    _submit_seq[sid] = _submit_seq.get(sid, 0) + 1
-    if sid not in _watchers:
-        _watchers.add(sid)
-        asyncio.create_task(_watch_turn(sid))
+def _arm_watcher(base: str, sid: str) -> None:
+    key = (base, sid)
+    _submit_seq[key] = _submit_seq.get(key, 0) + 1
+    if key not in _watchers:
+        _watchers.add(key)
+        asyncio.create_task(_watch_turn(base, sid))
 
 
-async def _wait_session_id(timeout: float = 8) -> str | None:
+async def _wait_target(timeout: float = 8) -> tuple[str | None, str | None]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         await asyncio.sleep(0.6)
         await asyncio.to_thread(_resolver.refresh)
-        sid = _resolver.current()
+        base, sid = _resolver.current_target()
         if sid:
-            return sid
-    return None
+            return base, sid
+    return None, None
 
 
 async def handle_user_text(text: str) -> str:
@@ -200,23 +202,23 @@ async def handle_user_text(text: str) -> str:
         return CONFIG["warmup_reply"]
 
     mode = read_send_mode()
-    # 只打本机 kimi web，忽略系统代理（Clash 等会把 127.0.0.1 拐走）
+    # 目标会话在收到文字时就锁定：若等耗时处理完再解析，会把话发到
+    # 用户等待期间切换到的会话（实测事故）
+    base, sid = await asyncio.to_thread(_resolve_target)
+    on_web = _resolver.on_kimi_web()
+    target_base = base or KIMI
+    logger.info("发送模式=%s 目标=%s 会话=%s 在网页=%s", mode, target_base, sid, on_web)
+    # 只打目标 kimi web，忽略系统代理（Clash 等会把 127.0.0.1 拐走）
     async with httpx.AsyncClient(trust_env=False) as client:
-        if not await _kimi_alive(client):
+        if not await _kimi_alive(client, target_base):
             _notify("Kimi Web 没有运行，语音指令没有发出去")
             return "Kimi Web 没有运行。"
 
-        # 目标会话在收到文字时就锁定：若等耗时处理完再解析，会把话发到
-        # 用户等待期间切换到的会话（实测事故）
-        sid = await asyncio.to_thread(_resolve_target)
-        on_web = _resolver.on_kimi_web()
-        logger.info("发送模式=%s 会话=%s 在网页=%s", mode, sid, on_web)
-
         if mode == SEND_FAST and sid:
-            status = await _send_prompt(client, sid, text)
+            status = await _send_prompt(client, target_base, sid, text)
             if status == "queued":
                 logger.info("指令已在 kimi web 排队（目标会话正忙）")
-            _arm_watcher(sid)
+            _arm_watcher(target_base, sid)
             return "已发送。"
 
         if mode == SEND_FAST and not on_web:
@@ -233,30 +235,32 @@ async def handle_user_text(text: str) -> str:
         if not submit:
             return "已放入输入框。"
         if not sid:
-            sid = await _wait_session_id()
+            base, sid = await _wait_target()
             if not sid:
                 _notify("已经贴进输入框，但网页还没建成会话")
                 return "已发送。"
-        logger.info("目标会话: %s", sid)
-        _arm_watcher(sid)
+            target_base = base or KIMI
+        logger.info("目标会话: %s @ %s", sid, target_base)
+        _arm_watcher(target_base, sid)
         return "已发送。"
 
 
-async def _watch_turn(sid: str) -> None:
-    """后台盯梢一个会话（每会话同一时刻只有一个，见 _watchers 去重）：
+async def _watch_turn(base: str, sid: str) -> None:
+    """后台盯梢一个会话（每目标同一时刻只有一个，见 _watchers 去重）：
     需要人工拍板时弹一次 Windows 通知，其余静默。队列里还有新语音指令
     （_submit_seq 增长）就继续盯，回合跑完且队列已空就退出。"""
+    key = (base, sid)
     interval = CONFIG["poll_interval_sec"]
     deadline = time.monotonic() + CONFIG["max_wait_sec"]
     start_deadline = time.monotonic() + 120  # 等本轮真正开始（防 busy=false 误判）
-    seen_seq = _submit_seq.get(sid, 0)
+    seen_seq = _submit_seq.get(key, 0)
     seen_busy = False
     notified = False
     async with httpx.AsyncClient(trust_env=False) as client:
         try:
             while time.monotonic() < deadline:
                 try:
-                    r = await client.get(f"{KIMI}/api/v1/sessions/{sid}", timeout=10)
+                    r = await client.get(f"{base}/api/v1/sessions/{sid}", timeout=10)
                     data = r.json().get("data", {})
                 except Exception as e:
                     logger.warning("轮询状态失败: %s", e)
@@ -273,9 +277,9 @@ async def _watch_turn(sid: str) -> None:
                 if data.get("busy") or data.get("main_turn_active"):
                     seen_busy = True
                 else:
-                    if _submit_seq.get(sid, 0) > seen_seq:
+                    if _submit_seq.get(key, 0) > seen_seq:
                         # 队列里还有新指令没起来，继续盯
-                        seen_seq = _submit_seq[sid]
+                        seen_seq = _submit_seq[key]
                     elif seen_busy:
                         return  # 回合跑完、队列已空
                     elif time.monotonic() > start_deadline:
@@ -284,7 +288,7 @@ async def _watch_turn(sid: str) -> None:
         except Exception as e:
             logger.warning("盯梢任务异常: %s", e)
         finally:
-            _watchers.discard(sid)
+            _watchers.discard(key)
 
 
 # ---------- OpenAI 兼容接口 ----------
@@ -356,7 +360,7 @@ def _panel_payload() -> dict:
             gate = raw
     except OSError:
         pass
-    sid = _resolver.current()
+    base, sid = _resolver.current_target()
     on_web = _resolver.on_kimi_web()
     if sid:
         target = "session"
@@ -370,6 +374,7 @@ def _panel_payload() -> dict:
         "ready": _ready,
         "gate": gate,
         "session_id": sid,
+        "target_base": base,
         "session_title": info["title"],
         "workspace": info["workspace"],
         "on_kimi_web": on_web,

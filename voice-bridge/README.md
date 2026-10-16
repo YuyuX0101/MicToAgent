@@ -47,10 +47,11 @@
   UIA 不可用（非 Windows / 未装 `uiautomation` 包）时一直返回 None，
   适配器会弹 Windows 通知提醒先选中会话。
   地址栏匹配默认认 `localhost/127.0.0.1:<port>`，`kimi_web_base` 自身
-  自动注册为别名——**远程场景**（如在 MateBook 上通过 Tailscale 访问
-  家里电脑的 kimi web）：把 MateBook 的 `kimi_web_base` 配成
-  `http://<tailscale-ip>:<port>` 即可，REST 发送直连远端 API、地址栏
-  识别无需额外配置；更多私有地址可配 `kimi_web_aliases`（host:port 列表）
+  自动注册为别名；更多私有地址可配 `kimi_web_aliases`（host:port 列表）。
+  **多机互通**：REST 投递按地址栏里的 authority 动态路由——浏览器前台
+  标签页是本机 kimi web 就投本机，是 Tailscale/局域网地址就投对应机器，
+  双标签页随意切换。要投到对端机器，把它的 `http://<ip>:<port>` 加进
+  `kimi_web_aliases`（`kimi_web_base` 已是该地址时无需再配）
 - `session_info.py` — 会话名/工作区名解析：地址栏只有会话 id，展示名读
   kimi CLI 本地数据（`session_index.jsonl` → `state.json` 的 title，
   `workspaces.json` 的 name）；只读，面板轮询时改名秒级同步

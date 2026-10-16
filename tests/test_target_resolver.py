@@ -17,6 +17,7 @@ sys.path.insert(0, str(VOICE_BRIDGE))
 from target_resolver import (  # noqa: E402
     FollowUiResolver,
     classify_omnibox,
+    extract_base_and_sid,
     extract_session_id,
     foreground_kimi_state,
 )
@@ -89,6 +90,48 @@ class TestExtractSessionId:
         )
 
 
+class TestExtractBaseAndSid:
+    """地址栏 → (base, sid)：REST 投递按地址栏 authority 路由（多机互通）。"""
+
+    PORT = 58627
+
+    def setup_method(self):
+        from target_resolver import set_address_aliases
+
+        set_address_aliases([])
+
+    def teardown_method(self):
+        from target_resolver import set_address_aliases
+
+        set_address_aliases([])
+
+    def test_localhost_normalized_to_loopback_base(self):
+        assert extract_base_and_sid(
+            "localhost:58627/sessions/session_a", self.PORT
+        ) == ("http://127.0.0.1:58627", "session_a")
+
+    def test_loopback_with_scheme(self):
+        assert extract_base_and_sid(
+            "http://127.0.0.1:58627/sessions/session_b?x=1", self.PORT
+        ) == ("http://127.0.0.1:58627", "session_b")
+
+    def test_alias_uses_registered_base(self):
+        from target_resolver import set_address_aliases
+
+        set_address_aliases(["http://100.91.110.120:58627"])
+        assert extract_base_and_sid(
+            "100.91.110.120:58627/sessions/session_remote", self.PORT
+        ) == ("http://100.91.110.120:58627", "session_remote")
+
+    def test_draft_page_returns_base_without_sid(self):
+        assert extract_base_and_sid("localhost:58627/", self.PORT) == (
+            "http://127.0.0.1:58627", None)
+
+    def test_other_site_returns_none_pair(self):
+        assert extract_base_and_sid("www.baidu.com/sessions/session_x", self.PORT) == (
+            None, None)
+
+
 class TestResolverPortParsing:
     def test_port_from_base_url(self):
         r = FollowUiResolver("http://127.0.0.1:58627", 0.7)
@@ -118,13 +161,14 @@ class TestAdapterResolveTarget:
             def refresh(self):
                 self.refreshed = True
 
-            def current(self):
-                assert self.refreshed, "必须先 refresh 再读 current"
-                return "session_followed-1"
+            def current_target(self):
+                assert self.refreshed, "必须先 refresh 再读 current_target"
+                return "http://127.0.0.1:58627", "session_followed-1"
 
         fake = FakeResolver()
         monkeypatch.setattr(adapter, "_resolver", fake)
-        assert adapter._resolve_target() == "session_followed-1"
+        assert adapter._resolve_target() == (
+            "http://127.0.0.1:58627", "session_followed-1")
         assert fake.refreshed
 
     def test_no_selection_returns_none(self, adapter, monkeypatch):
@@ -132,11 +176,11 @@ class TestAdapterResolveTarget:
             def refresh(self):
                 pass
 
-            def current(self):
-                return None
+            def current_target(self):
+                return None, None
 
         monkeypatch.setattr(adapter, "_resolver", FakeResolver())
-        assert adapter._resolve_target() is None
+        assert adapter._resolve_target() == (None, None)
 
 
 class TestClassifyOmnibox:
@@ -193,6 +237,11 @@ class TestAdapterDraftTyping:
             def current(self):
                 return sid
 
+            def current_target(self):
+                if sid:
+                    return "http://127.0.0.1:58627", sid
+                return ("http://127.0.0.1:58627", None) if on_web else (None, None)
+
             def on_kimi_web(self):
                 return on_web
 
@@ -204,11 +253,11 @@ class TestAdapterDraftTyping:
         sent = []
         pasted = []
 
-        async def fake_alive(client):
+        async def fake_alive(client, base):
             return True
 
-        async def fake_send(client, sid, text):
-            sent.append((sid, text))
+        async def fake_send(client, base, sid, text):
+            sent.append((base, sid, text))
             return "running"
 
         def fake_paste(text, submit):
@@ -216,9 +265,9 @@ class TestAdapterDraftTyping:
             return "ok"
 
         async def fake_wait(timeout=8):
-            return "session_new-1"
+            return "http://127.0.0.1:58627", "session_new-1"
 
-        async def fake_watch(sid):
+        async def fake_watch(base, sid):
             return None
 
         monkeypatch.setattr(adapter, "read_send_mode", lambda: "fast")
@@ -226,7 +275,7 @@ class TestAdapterDraftTyping:
         monkeypatch.setattr(adapter, "_kimi_alive", fake_alive)
         monkeypatch.setattr(adapter, "_send_prompt", fake_send)
         monkeypatch.setattr(adapter, "_paste", fake_paste)
-        monkeypatch.setattr(adapter, "_wait_session_id", fake_wait)
+        monkeypatch.setattr(adapter, "_wait_target", fake_wait)
         monkeypatch.setattr(adapter, "_watch_turn", fake_watch)
         adapter._submit_seq.clear()
         adapter._watchers.clear()
@@ -236,15 +285,15 @@ class TestAdapterDraftTyping:
         assert reply == "已发送。"
         assert sent == []
         assert pasted == [("帮我看看这个项目", True)]
-        assert adapter._submit_seq.get("session_new-1") == 1
-        assert "session_new-1" in adapter._watchers
+        assert adapter._submit_seq.get(("http://127.0.0.1:58627", "session_new-1")) == 1
+        assert ("http://127.0.0.1:58627", "session_new-1") in adapter._watchers
 
     def test_draft_type_failure_notifies(self, adapter, monkeypatch):
         import asyncio
 
         notes = []
 
-        async def fake_alive(client):
+        async def fake_alive(client, base):
             return True
 
         def fake_paste(text, submit):
@@ -269,7 +318,7 @@ class TestAdapterDraftTyping:
         notes = []
         pasted = []
 
-        async def fake_alive(client):
+        async def fake_alive(client, base):
             return True
 
         def fake_paste(text, submit):

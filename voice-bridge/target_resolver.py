@@ -39,15 +39,21 @@ _BROWSER_WNDCLASS = "Chrome_WidgetWin_1"
 # 由 set_address_aliases 在适配器启动时注册，匹配逻辑对三个调用方
 # （跟随轮询 / 发送前刷新 / 粘贴前置检查）统一生效。
 _EXTRA_AUTHORITIES: list[str] = []
+# authority → 完整 base URL：REST 投递按地址栏里的 authority 路由
+# （本机/远端双标签页场景，前台显示哪个网页就投哪个）。
+_EXTRA_BASES: dict[str, str] = {}
 
 
 def set_address_aliases(bases) -> None:
     """注册额外地址：host:port 或完整 URL（如 http://192.168.x.x:58627）。"""
     _EXTRA_AUTHORITIES.clear()
+    _EXTRA_BASES.clear()
     for base in bases or []:
-        netloc = urlparse(base if "://" in str(base) else f"http://{base}").netloc
+        url = str(base) if "://" in str(base) else f"http://{base}"
+        netloc = urlparse(url).netloc
         if netloc and netloc not in _EXTRA_AUTHORITIES:
             _EXTRA_AUTHORITIES.append(netloc)
+            _EXTRA_BASES[netloc] = url.rstrip("/")
 
 
 def _authority_alt(port: int) -> str:
@@ -55,6 +61,21 @@ def _authority_alt(port: int) -> str:
     auths = [f"localhost:{port}", f"127.0.0.1:{port}"]
     auths += [a for a in _EXTRA_AUTHORITIES if a not in auths]
     return "(?:" + "|".join(re.escape(a) for a in auths) + ")"
+
+
+def extract_base_and_sid(omnibox_value: str, port: int) -> tuple[str | None, str | None]:
+    """地址栏 → (kimi web base, 会话 id)。不是 kimi web 页面返回 (None, None)；
+    草稿页（裸域名）返回 (base, None)。base 跟随地址栏里的 authority：
+    localhost/127.0.0.1 归一为 http://127.0.0.1:<port>，别名用注册时的 URL。"""
+    if not omnibox_value:
+        return None, None
+    m = re.search(rf"({_authority_alt(port)})(?:/|$)", omnibox_value)
+    if not m:
+        return None, None
+    auth = m.group(1)
+    base = _EXTRA_BASES.get(auth, f"http://127.0.0.1:{port}")
+    sid_m = re.search(rf"{re.escape(auth)}/sessions/([\w-]+)", omnibox_value)
+    return base, (sid_m.group(1) if sid_m else None)
 
 
 def extract_session_id(omnibox_value: str, port: int) -> str | None:
@@ -153,6 +174,7 @@ class FollowUiResolver:
         self._port = port or (443 if kimi_base.startswith("https") else 80)
         self._interval = max(0.3, float(interval_sec))
         self._current: str | None = None
+        self._current_base: str | None = None
         self._on_kimi_web: bool = False
         self._lock = threading.Lock()
         self._poll_lock = threading.Lock()
@@ -186,6 +208,11 @@ class FollowUiResolver:
         with self._lock:
             return self._current
 
+    def current_target(self) -> tuple[str | None, str | None]:
+        """返回缓存的 (base, 会话 id)。base 跟随地址栏 authority（本机/远端）。"""
+        with self._lock:
+            return self._current_base, self._current
+
     def on_kimi_web(self) -> bool:
         """浏览器里是否有 kimi web 页面（不一定选中了会话）。
         True 且 current() 为 None = 正停在新建会话草稿页。"""
@@ -217,17 +244,21 @@ class FollowUiResolver:
         # 后台轮询和发送前的同步刷新可能撞车，串行化避免并发走 UIA
         with self._poll_lock:
             sid: str | None = None
+            base: str | None = None
             on_web = False
             for hwnd in _enum_browser_hwnds():
-                state, found = classify_omnibox(_read_omnibox(hwnd), self._port)
-                if state == "session":
-                    sid = found
+                found_base, found_sid = extract_base_and_sid(
+                    _read_omnibox(hwnd), self._port)
+                if found_sid:
+                    sid, base = found_sid, found_base
                     on_web = True
                     break
-                if state == "home":
+                if found_base:
                     on_web = True
         with self._lock:
             self._on_kimi_web = on_web
-            if sid != self._current:
-                logger.info("跟随目标切换: %s -> %s", self._current, sid)
+            if (sid, base) != (self._current, self._current_base):
+                logger.info("跟随目标切换: %s@%s -> %s@%s",
+                            self._current, self._current_base, sid, base)
                 self._current = sid
+                self._current_base = base
