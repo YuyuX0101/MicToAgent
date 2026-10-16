@@ -59,6 +59,35 @@ class TestExtractSessionId:
     def test_empty_value(self):
         assert extract_session_id("", self.PORT) is None
 
+    def test_registered_alias_matched(self):
+        # 远端访问场景：base/地址栏是 Tailscale IP，注册别名后能识别会话页
+        from target_resolver import set_address_aliases
+
+        set_address_aliases(["http://100.76.37.10:58627"])
+        try:
+            assert (
+                extract_session_id(
+                    "100.76.37.10:58627/sessions/session_remote-1", self.PORT
+                )
+                == "session_remote-1"
+            )
+            # 别名不影响默认 localhost/127.0.0.1 匹配
+            assert (
+                extract_session_id("localhost:58627/sessions/session_a", self.PORT)
+                == "session_a"
+            )
+        finally:
+            set_address_aliases([])
+
+    def test_unregistered_alias_rejected(self):
+        from target_resolver import set_address_aliases
+
+        set_address_aliases([])
+        assert (
+            extract_session_id("100.76.37.10:58627/sessions/session_x", self.PORT)
+            is None
+        )
+
 
 class TestResolverPortParsing:
     def test_port_from_base_url(self):

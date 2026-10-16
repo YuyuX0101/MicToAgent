@@ -74,8 +74,10 @@ _last_notice: str = ""
 # 跟随当前选中会话的解析器（启动事件里 start）
 from target_resolver import FollowUiResolver, set_address_aliases
 
-# 本机私有地址别名（config.json 的 kimi_web_aliases，gitignore 不外传）
-set_address_aliases(CONFIG.get("kimi_web_aliases", []))
+# 本机私有地址别名（config.json 的 kimi_web_aliases，gitignore 不外传）。
+# KIMI 基址本身自动注册为别名：base 配成 Tailscale/局域网地址时，地址栏
+# 显示的就是这个 authority，无需再手动配 alias 才能识别会话页。
+set_address_aliases([KIMI] + CONFIG.get("kimi_web_aliases", []))
 
 _resolver = FollowUiResolver(KIMI, CONFIG.get("follow_poll_interval_sec", 0.7))
 

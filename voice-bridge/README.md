@@ -45,7 +45,12 @@
   保证刚切换会话就说话也进对会话。另提供 `foreground_kimi_state`：只看
   前台窗口，不激活。
   UIA 不可用（非 Windows / 未装 `uiautomation` 包）时一直返回 None，
-  适配器会弹 Windows 通知提醒先选中会话
+  适配器会弹 Windows 通知提醒先选中会话。
+  地址栏匹配默认认 `localhost/127.0.0.1:<port>`，`kimi_web_base` 自身
+  自动注册为别名——**远程场景**（如在 MateBook 上通过 Tailscale 访问
+  家里电脑的 kimi web）：把 MateBook 的 `kimi_web_base` 配成
+  `http://<tailscale-ip>:<port>` 即可，REST 发送直连远端 API、地址栏
+  识别无需额外配置；更多私有地址可配 `kimi_web_aliases`（host:port 列表）
 - `session_info.py` — 会话名/工作区名解析：地址栏只有会话 id，展示名读
   kimi CLI 本地数据（`session_index.jsonl` → `state.json` 的 title，
   `workspaces.json` 的 name）；只读，面板轮询时改名秒级同步

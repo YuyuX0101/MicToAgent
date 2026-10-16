@@ -1,5 +1,6 @@
 {
   "kimi_web_base": "http://127.0.0.1:58627",
+  "kimi_web_aliases": [],
   "listen_host": "127.0.0.1",
   "listen_port": 9100,
   "follow_poll_interval_sec": 0.7,
