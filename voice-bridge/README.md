@@ -51,7 +51,9 @@
   **多机互通**：REST 投递按地址栏里的 authority 动态路由——浏览器前台
   标签页是本机 kimi web 就投本机，是 Tailscale/局域网地址就投对应机器，
   双标签页随意切换。要投到对端机器，把它的 `http://<ip>:<port>` 加进
-  `kimi_web_aliases`（`kimi_web_base` 已是该地址时无需再配）
+  `kimi_web_aliases`（`kimi_web_base` 已是该地址时无需再配）。
+  注意 `.env` 的 `KIMI_WEB_BASE` 优先级高于 config.json 的
+  `kimi_web_base`——改 base 时两处要一起改，否则 config 改了不生效
 - `session_info.py` — 会话名/工作区名解析：地址栏只有会话 id，展示名读
   kimi CLI 本地数据（`session_index.jsonl` → `state.json` 的 title，
   `workspaces.json` 的 name）；只读，面板轮询时改名秒级同步
