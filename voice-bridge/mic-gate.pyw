@@ -224,6 +224,23 @@ def _set_listen(on: bool) -> None:
         _sync()
 
 
+def _release_dual(kind: str) -> None:
+    """双模键松开：先算清最终状态再一次性 _sync（一次写文件、一次换图标）。
+
+    拆成 _ptt_up()+_toggle() 会在一次松开里连写两次 gate.state——点按开门
+    的中间态是 "0"，托盘图标绿→红→绿闪一帧（图标更新是否被 Windows 合并
+    看机器时序，MateBook 上肉眼可见）；中间态 "0" 若被 voice-core 读到
+    还会误触发关门 flush。"""
+    global _ptt_held, _toggle_on
+    with _lock:
+        _ptt_held = False
+        if kind == "tap":
+            _toggle_on = not _toggle_on
+        elif _toggle_on:
+            _toggle_on = False  # 常听中长按说完：松开连常听一起关掉
+        _sync()
+
+
 def _poll_loop() -> None:
     """轮询按键状态，边沿触发。双模键：按下即开收音（长按不丢开头），
     松开时按持有时长区分点按（切换常听）和长按（结束说话）。
@@ -271,12 +288,9 @@ def _poll_loop() -> None:
                 _ptt_down()   # 先按按住说话开门，点按也不会丢失开头
             elif not down and prev[vk]:
                 since = dual_down_since.pop(vk, now)
-                _ptt_up()
-                if _dual_release_kind(since, now) == "tap":
-                    _toggle()   # 短按=切换常听开/关
-                elif _toggle_on:
-                    _toggle()   # 常听中长按说完：松开连常听一起关掉
-                                # （关门立即切段提交，由 voice-core 分段器保证）
+                _release_dual(_dual_release_kind(since, now))
+                # 点按=切换常听开/关；常听中长按说完：松开连常听一起关掉
+                # （关门立即切段提交，由 voice-core 分段器保证）
             prev[vk] = down
 
         # 说话动画：只在开门且 VAD 检出真实语音时播；停止说话回静态图标
