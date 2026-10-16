@@ -914,11 +914,23 @@ def make_audio_callback(gate_value, frame_queue):
     """sounddevice 回调：关门（gate "0"）直接丢弃音频；开门只把帧丢进队列，
     不做任何重活（实时回调里不能阻塞）。
     队列满（主循环掉队超 ~9.6s，系统卡顿/占满 CPU 时可能触发）必须打日志：
-    丢帧 = 话中间丢字，静默丢弃会让排查无门。"""
+    丢帧 = 话中间丢字，静默丢弃会让排查无门。
+
+    返回 (callback, last_callback_at)：last_callback_at[0] 是最近一次回调的
+    monotonic 时间，主循环用它做音频流假死看门狗（设备被系统挂起/切换时
+    回调会静默停发，不收音也无报错）。"""
     dropped = 0
+    bad_status = 0
+    last_callback_at = [0.0]
 
     def callback(indata, frames, time_info, status):
-        nonlocal dropped
+        nonlocal dropped, bad_status
+        last_callback_at[0] = time.monotonic()
+        if status:
+            bad_status += 1
+            if bad_status % 32 == 1:   # 不刷屏
+                logger.warning("音频回调状态异常（%s，累计 %d 次）",
+                               status, bad_status)
         if gate_value() == "0":
             return
         try:
@@ -928,7 +940,7 @@ def make_audio_callback(gate_value, frame_queue):
             if dropped % 32 == 1:   # 每丢约 1s 报一次，不刷屏
                 logger.warning("音频队列已满，正在丢帧（累计 %d 帧）——"
                                "主循环跟不上，语音会丢字", dropped)
-    return callback
+    return callback, last_callback_at
 
 
 # ---------- 主流程 ----------
@@ -978,26 +990,60 @@ def main() -> None:
 
     import sounddevice as sd
     frames = queue.Queue(maxsize=300)
-    callback = make_audio_callback(gate.value, frames)
+    callback, last_callback_at = make_audio_callback(gate.value, frames)
+    stream = None
+    stream_retry_at = 0.0
+    last_stream_notice = 0.0
     try:
-        with sd.InputStream(samplerate=SAMPLE_RATE, dtype="int16", channels=1,
-                            blocksize=BLOCKSIZE, callback=callback):
-            while True:
-                try:
-                    frame = frames.get(timeout=0.05)
-                except queue.Empty:
-                    frame = None
-                while True:         # 识别结果回流（保持主循环单线程访问分段器）
+        while True:
+            # 音频流看门狗：流断开或回调停发 >10s（麦克风被系统挂起/设备切换
+            # 的典型死法：不收音、不报错，托盘图标却正常变绿）就自动重建
+            now = time.monotonic()
+            if (stream is None or not stream.active
+                    or now - last_callback_at[0] > 10.0) and now >= stream_retry_at:
+                if stream is not None:
+                    reason = "回调停发" if stream.active else "流已断开"
+                    logger.warning("音频输入流假死（%s），正在重建", reason)
                     try:
-                        turn_id, chunk_idx, kind, text = recog_results.get_nowait()
-                    except queue.Empty:
-                        break
-                    segmenter.on_recog_result(turn_id, chunk_idx, kind, text)
-                if frame is not None:
-                    segmenter.feed(frame, gate.value())
-                segmenter.poll()
+                        stream.close()
+                    except Exception:
+                        pass
+                try:
+                    stream = sd.InputStream(
+                        samplerate=SAMPLE_RATE, dtype="int16", channels=1,
+                        blocksize=BLOCKSIZE, callback=callback)
+                    stream.start()
+                    last_callback_at[0] = time.monotonic()
+                    logger.info("音频输入流已重建")
+                    if stream_retry_at and now - last_stream_notice > 300:
+                        # 断流后重建成功才通知（首次启动不通知），5 分钟内不重复
+                        last_stream_notice = now
+                        _win_notify("麦克风输入中断过，已自动恢复收音")
+                except Exception as e:
+                    stream = None
+                    stream_retry_at = time.monotonic() + 5.0
+                    logger.warning("音频输入流重建失败（%s），5s 后重试", e)
+            try:
+                frame = frames.get(timeout=0.05)
+            except queue.Empty:
+                frame = None
+            while True:         # 识别结果回流（保持主循环单线程访问分段器）
+                try:
+                    turn_id, chunk_idx, kind, text = recog_results.get_nowait()
+                except queue.Empty:
+                    break
+                segmenter.on_recog_result(turn_id, chunk_idx, kind, text)
+            if frame is not None:
+                segmenter.feed(frame, gate.value())
+            segmenter.poll()
     except KeyboardInterrupt:
         logger.info("语音核心退出")
+    finally:
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

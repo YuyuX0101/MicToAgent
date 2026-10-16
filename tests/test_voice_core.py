@@ -513,7 +513,7 @@ def test_audio_callback_discards_when_gate_closed(env):
     import queue as q
     frames = q.Queue()
     gate = {"v": "0"}
-    cb = env.core.make_audio_callback(lambda: gate["v"], frames)
+    cb, _ = env.core.make_audio_callback(lambda: gate["v"], frames)
     indata = np.zeros((512, 1), dtype=np.int16)
     cb(indata, 512, None, None)                 # 关门：丢弃
     assert frames.empty()
@@ -523,6 +523,19 @@ def test_audio_callback_discards_when_gate_closed(env):
     gate["v"] = "2"
     cb(indata, 512, None, None)                 # 按住说话：同样放行
     assert frames.qsize() == 1
+
+
+def test_audio_callback_liveness_heartbeat(env):
+    """回调心跳（音频流假死看门狗的依据）：关门也更新；状态异常不致命。"""
+    import queue as q
+    frames = q.Queue()
+    cb, last_at = env.core.make_audio_callback(lambda: "0", frames)
+    assert last_at[0] == 0.0
+    indata = np.zeros((512, 1), dtype=np.int16)
+    cb(indata, 512, None, None)
+    assert last_at[0] > 0.0                     # 关门丢帧但心跳照打
+    cb(indata, 512, None, "input overflow")     # PortAudio 状态异常不炸回调
+    assert frames.empty()
 
 
 def test_speak_reported_while_triggered(env):
