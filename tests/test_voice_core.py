@@ -730,6 +730,7 @@ HOTWORD_FILE_CONTENT = """\
 # 注释行会被忽略
 会话
 工作区
+kimi code
 chemicde=>kimi code
 """
 
@@ -742,15 +743,17 @@ def hotword_file(tmp_path):
 
 
 def test_parse_hotword_files(core, hotword_file):
-    explicit, fuzzy = core.parse_hotword_files([hotword_file])
+    explicit, fuzzy, english = core.parse_hotword_files([hotword_file])
     assert explicit == {"chemicde": "kimi code"}
     assert fuzzy == ["会话", "工作区"]
+    assert english == ["kimi code"]
 
 
 def test_parse_hotword_files_missing_file(core, tmp_path):
-    explicit, fuzzy = core.parse_hotword_files([str(tmp_path / "nope.txt")])
+    explicit, fuzzy, english = core.parse_hotword_files([str(tmp_path / "nope.txt")])
     assert explicit == {}
     assert fuzzy == []
+    assert english == []
 
 
 @pytest.fixture()
@@ -787,6 +790,53 @@ def test_syllable_boundary_is_not_overcorrected(core, tmp_path):
     assert c.apply("我经常说连接和连网") == "我经常说连接和连网"
     assert c.apply("先去利安再回来") == "先去立案再回来"
     assert c.apply("已经立案。下一步") == "已经立案。下一步"
+
+
+# ---------- 英文热词模糊纠错 ----------
+
+@pytest.fixture()
+def en_corrector(core, tmp_path):
+    pytest.importorskip("pypinyin")
+    pytest.importorskip("rapidfuzz")
+    p = tmp_path / "hotwords.txt"
+    p.write_text("kimi code\nMicToAgent\nDeepSeek\nAI\n", encoding="utf-8")
+    c = core.HotwordCorrector([str(p)])
+    c.reload_if_changed()
+    return c
+
+
+def test_english_fuzzy_near_miss(en_corrector):
+    # 1 个字母之差的误听自动纠正，不需要逐条建显式映射
+    assert en_corrector.apply("我用kimi cold写代码") == "我用kimi code写代码"
+    assert en_corrector.apply("Kimi Cold 真好用") == "kimi code 真好用"
+
+
+def test_english_fuzzy_unifies_case_and_spacing(en_corrector):
+    # 大小写/分词变体归一到词表规范写法
+    assert en_corrector.apply("打开 mic to agent 项目") == "打开 MicToAgent 项目"
+    assert en_corrector.apply("用 deep seek 查一下") == "用 DeepSeek 查一下"
+
+
+def test_english_fuzzy_no_false_positive(en_corrector):
+    # deep sea 与 DeepSeek 相似度 0.80 < 阈值 0.85，不得误改
+    assert en_corrector.apply("the deep sea is blue") == "the deep sea is blue"
+    # 已正确的文本原样保留
+    assert en_corrector.apply("用 kimi code 和 DeepSeek") == "用 kimi code 和 DeepSeek"
+
+
+def test_english_fuzzy_short_target_excluded(en_corrector):
+    # 归一化 <5 字母的缩写不参与模糊（只能走显式映射）
+    assert en_corrector.apply("他说了一个 A I") == "他说了一个 A I"
+
+
+def test_english_fuzzy_wild_miss_not_matched(en_corrector):
+    # 大偏差误听与目标相差太远，模糊收不到（靠显式映射兜底）
+    assert en_corrector.apply("Timmy caughtd 是什么") == "Timmy caughtd 是什么"
+
+
+def test_english_fuzzy_cjk_gap_not_merged(en_corrector):
+    # 窗口内夹中文不得合并替换
+    assert en_corrector.apply("kimi 的 code 在这里") == "kimi 的 code 在这里"
 
 
 # ---------- 语气词与口吃清理 ----------

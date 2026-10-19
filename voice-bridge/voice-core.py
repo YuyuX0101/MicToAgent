@@ -180,19 +180,25 @@ def normalize_stt_text(text: str) -> str:
     return _CJK_ADJACENT_SPACE.sub("", text.strip())
 
 
-def parse_hotword_files(paths: list) -> tuple[dict, list]:
-    """解析热词表文件，返回 (显式纠错映射, 同音目标词)。
+_EN_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .'&+\-]*")
+
+
+def parse_hotword_files(paths: list) -> tuple[dict, list, list]:
+    """解析热词表文件，返回 (显式纠错映射, 中文同音目标词, 英文模糊目标词)。
 
     每行一条：
       错误词=>目标词   显式替换（识别结果里出现"错误词"就直接换成"目标词"）
-      目标词           同音目标（拼音完全相同的误听会被纠正为目标词，仅限纯中文词）
+      目标词           纯中文 → 拼音同音模糊目标；纯英文 → 英文模糊目标
+                       （见 _apply_english_fuzzy 的机制与守卫）
 
-    含英文的词两种机制都不适用：拼音键会丢掉英文字母（纯英文词拼音键为空、
-    中英混杂词会和自身子串碰撞——实测「AI日报」把「I日报」替换成「AI日报」
-    变成「AAI日报」），英文误听只能用「错误词=>目标词」显式映射逐条补充。
+    中英混杂的词两种模糊机制都不适用：拼音键会丢掉英文字母（中英混杂词会
+    和自身子串碰撞——实测「AI日报」把「I日报」替换成「AI日报」变成
+    「AAI日报」），英文模糊按英文 token 滑窗也对不上中文部分。混杂词只能
+    用「错误词=>目标词」显式映射逐条补充。
     """
     explicit: dict = {}
     fuzzy: list = []
+    english: list = []
     for path in paths:
         try:
             with open(path, encoding="utf-8") as f:
@@ -212,20 +218,103 @@ def parse_hotword_files(paths: list) -> tuple[dict, list]:
                         explicit[wrong] = right
                         mapped = True
                     break
-            if not mapped and _CJK_FULLMATCH.fullmatch(word):
+            if mapped:
+                continue
+            if _CJK_FULLMATCH.fullmatch(word):
                 fuzzy.append(word)
-    return explicit, fuzzy
+            elif _EN_WORD.fullmatch(word):
+                english.append(word)
+    return explicit, fuzzy, english
+
+
+# 英文模糊纠错：英文没有拼音可比对，用「按词滑窗 + 字母编辑相似度」代替。
+_EN_TOKEN = re.compile(r"[A-Za-z0-9]+")
+_EN_FUZZY_THRESHOLD = 0.85
+_EN_MIN_NORM_LEN = 5          # 归一化短于 5 个字母的目标不参与模糊（「AI」类缩写只走显式映射）
+_EN_MIN_NORM_LEN_SINGLE = 6   # 单词目标更严：归一化 ≥6 个字母
+
+try:
+    from rapidfuzz import fuzz as _rf_fuzz
+except ImportError:  # pragma: no cover - 环境缺依赖时英文模糊整体跳过
+    _rf_fuzz = None
+
+
+def _normalize_en(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _apply_english_fuzzy(text: str, targets: list) -> tuple:
+    """对识别文本做英文热词模糊纠正，返回 (新文本, [(原文片段, 替换词)])。
+
+    机制（对应中文的拼音同音）：把文本里的英文/数字 token 逐个抽出，按
+    目标的词数 w 滑 w-1~w+2 个 token 的窗口（w+2 宽容是为了收「mic to
+    agent」这种一词被拆成多 token 的情况），窗口字母归一化后与目标
+    归一化形式算 rapidfuzz 相似度，≥阈值即替换为词表里的规范写法
+    （顺带统一大小写与分词：mic to agent → MicToAgent）。
+
+    守卫（英文误改代价比中文大，必须保守）：
+    - 归一化过短的目标不参与（见 _EN_MIN_NORM_LEN*）；
+    - 窗口与目标归一化后首字母必须相同（廉价剪掉绝大多数不相关窗口）；
+    - 窗口内不得夹中文（「kimi 的 code」不许合并替换）；
+    - 阈值 0.85：归一化 ≥7 字母才容得下 1 个字母的替换
+      （kimi cold→kimi code 相似度 0.875 命中；deep sea→DeepSeek
+      0.80 不命中）。
+    大偏差误听（如「Timmy caughtd」与目标相差太远）只能靠显式映射
+    兜底——阈值放到能收它们的程度会把正常英文文本改得面目全非。
+    """
+    if not text or not targets or _rf_fuzz is None:
+        return text, []
+    tokens = [(m.start(), m.end()) for m in _EN_TOKEN.finditer(text)]
+    if not tokens:
+        return text, []
+
+    candidates = []
+    for target, tnorm, w in targets:
+        for ws in range(max(1, w - 1), w + 3):
+            for i in range(0, len(tokens) - ws + 1):
+                start = tokens[i][0]
+                end = tokens[i + ws - 1][1]
+                surface = text[start:end]
+                if _CJK_FULLMATCH.search(surface):
+                    continue
+                wnorm = _normalize_en(surface)
+                if not wnorm or wnorm[0] != tnorm[0] or surface == target:
+                    continue
+                score = _rf_fuzz.ratio(wnorm, tnorm) / 100.0
+                if score >= _EN_FUZZY_THRESHOLD:
+                    candidates.append((score, end - start, start, end, target, surface))
+
+    if not candidates:
+        return text, []
+    # 高分、长片段优先，贪心取不重叠
+    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+    occupied: list = []
+    selected = []
+    for cand in candidates:
+        _, _, start, end, _, _ = cand
+        if any(not (end <= s or start >= e) for s, e in occupied):
+            continue
+        occupied.append((start, end))
+        selected.append(cand)
+    updated = text
+    applied = []
+    for score, _, start, end, target, surface in sorted(selected, key=lambda c: c[2], reverse=True):
+        updated = updated[:start] + target + updated[end:]
+        applied.append((surface, target))
+    applied.reverse()
+    return updated, applied
 
 
 class HotwordCorrector:
-    """识别后文本纠错（显式映射 + 拼音同音纠正），词表文件 mtime 变了自动重建
-    （改完 hotwords.txt 不用重启，下一次识别即生效）。
+    """识别后文本纠错（显式映射 + 拼音同音纠正 + 英文模糊纠正），词表文件
+    mtime 变了自动重建（改完 hotwords.txt 不用重启，下一次识别即生效）。
 
-    阈值固定 1.0（纯同音才替换）：模糊窗口允许目标长度 ±1，阈值放低会误改
-    （实测「区下」被改成「取消」、「的小说」被改成「小说」）。拼音按音节
-    加分隔符比对，音节结构不同的词不算同音（连 lian ≠ 立案 li-an）。
-    阈值 1.0 下 matcher 走拼音键字典查表（精确路径），纠错耗时与词表
-    规模脱钩（实测 214→2000 词均 ~80ms/次，192 字文本），词表随便涨。
+    中文同音阈值固定 1.0（纯同音才替换）：模糊窗口允许目标长度 ±1，阈值
+    放低会误改（实测「区下」被改成「取消」、「的小说」被改成「小说」）。
+    拼音按音节加分隔符比对，音节结构不同的词不算同音（连 lian ≠ 立案
+    li-an）。阈值 1.0 下 matcher 走拼音键字典查表（精确路径），纠错耗时
+    与词表规模脱钩（实测 214→2000 词均 ~80ms/次，192 字文本），词表随便涨。
+    英文走 _apply_english_fuzzy（按词滑窗 + 编辑相似度，守卫见该函数）。
     matcher 用的是 vendor 进来的 FunASR PostprocessHotwordMatcher（MIT），
     不再依赖 funasr 内部 API。"""
 
@@ -233,6 +322,7 @@ class HotwordCorrector:
         self._paths = [str(p) for p in paths]
         self._sig = None
         self._matcher = None
+        self._english: list = []
 
     def reload_if_changed(self) -> None:
         if not self._paths:
@@ -241,7 +331,7 @@ class HotwordCorrector:
                     for p in self._paths)
         if sig == self._sig:
             return
-        explicit, fuzzy = parse_hotword_files(self._paths)
+        explicit, fuzzy, english = parse_hotword_files(self._paths)
         if not explicit and not fuzzy:
             self._matcher = None
         else:
@@ -253,17 +343,35 @@ class HotwordCorrector:
                 return
             self._matcher = PostprocessHotwordMatcher(
                 explicit_map=explicit, fuzzy_targets=fuzzy, threshold=1.0)
+        self._english = []
+        for word in english:
+            tnorm = _normalize_en(word)
+            w = len(word.split())
+            if len(tnorm) < _EN_MIN_NORM_LEN or (w == 1 and len(tnorm) < _EN_MIN_NORM_LEN_SINGLE):
+                continue
+            self._english.append((word, tnorm, w))
+        if self._english and _rf_fuzz is None:
+            logger.warning("英文热词模糊纠错不可用（缺依赖: rapidfuzz）")
+            self._english = []
         self._sig = sig
-        logger.info("热词表已加载: %d 条显式映射, %d 个同音目标",
-                    len(explicit), len(fuzzy))
+        logger.info("热词表已加载: %d 条显式映射, %d 个同音目标, %d 个英文模糊目标",
+                    len(explicit), len(fuzzy), len(self._english))
 
     def apply(self, text: str) -> str:
-        if self._matcher is None or not text:
+        if not text:
             return text
-        corrected, matches = self._matcher.apply_text(text)
-        if matches:
-            logger.info("热词纠错: %s -> %s (%s)", text, corrected,
-                        [(m.original, m.replacement) for m in matches])
+        corrected = text
+        if self._matcher is not None:
+            corrected, matches = self._matcher.apply_text(corrected)
+            if matches:
+                logger.info("热词纠错: %s -> %s (%s)", text, corrected,
+                            [(m.original, m.replacement) for m in matches])
+        if self._english:
+            updated, en_matches = _apply_english_fuzzy(corrected, self._english)
+            if en_matches:
+                logger.info("英文热词模糊纠错: %s -> %s (%s)",
+                            corrected, updated, en_matches)
+                corrected = updated
         return corrected
 
 
@@ -772,11 +880,11 @@ class Recognizer(threading.Thread):
     (turn_id, chunk_idx, kind, text) 回流。整轮作废走 purge(turn_id)：
     清掉队列里该轮未做的任务（在途那个做完照常回流，由分段器按死 turn 丢弃）。
 
-    热词纠错只有事后一层（HotwordCorrector，显式映射 + 拼音同音，全量
-    词表、热更新），对全部引擎、每个片段结果生效。qwen3 的解码偏置热词
-    已移除：偏置词是 prompt 前缀，占用 max_total_len=512 的模型硬上限，
-    词表增长曾让 prompt 超限、生成必然为空、静默丢字；纠错收益主要在
-    中文同音词，恰是事后纠错的主场，故只保留这一层。"""
+    热词纠错只有事后一层（HotwordCorrector，显式映射 + 拼音同音 + 英文
+    模糊，全量词表、热更新），对全部引擎、每个片段结果生效。qwen3 的
+    解码偏置热词已移除：偏置词是 prompt 前缀，占用 max_total_len=512
+    的模型硬上限，词表增长曾让 prompt 超限、生成必然为空、静默丢字；
+    纠错收益主要在中文同音词，恰是事后纠错的主场，故只保留这一层。"""
 
     def __init__(self, cfg, corrector, result_queue: queue.Queue):
         super().__init__(daemon=True, name="voice-core-stt")
