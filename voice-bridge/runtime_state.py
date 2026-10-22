@@ -5,6 +5,7 @@ Copyright 2026 MicToAgent contributors
 
 这些文件都是本机运行产物（已 gitignore），和 gate.state 一样原子写：
 - send.mode   发送模式（adapter 每句读取，下一句生效）
+- target.mode 投递目标（面板切换即时生效，覆盖 config.json 的 target）
 - gate.cmd    面板请求静音/常听（mic-gate 轮询消费，禁止直接改 gate.state）
 - panel.cmd   托盘/快捷方式请求显示控制面板（panel.pyw 消费）
 - stop.cmd    请各进程自行退出（mic-gate 先注销托盘图标；launcher 再杀残留）
@@ -39,6 +40,11 @@ SEND_NOTES = {
     SEND_COMPOSE: "只粘贴到输入框，由你检查后再发。",
 }
 
+TARGET_AUTO = "auto"
+TARGET_KIMI_WEB = "kimi_web"
+TARGET_DSH = "dsh"
+TARGET_MODES = (TARGET_AUTO, TARGET_KIMI_WEB, TARGET_DSH)
+
 PANEL_MUTEX = "MicToAgent-panel"
 
 CLOSE_TRAY = "tray"
@@ -49,6 +55,10 @@ CLOSE_DEFAULT = CLOSE_TRAY
 
 def send_mode_path() -> Path:
     return bridge_dir() / "send.mode"
+
+
+def target_mode_path() -> Path:
+    return bridge_dir() / "target.mode"
 
 
 def gate_cmd_path() -> Path:
@@ -81,6 +91,22 @@ def write_send_mode(mode: str) -> str:
     if mode not in SEND_MODES:
         raise ValueError(f"未知发送模式: {mode}")
     _atomic_write(send_mode_path(), mode)
+    return mode
+
+
+def read_target_mode() -> str | None:
+    """投递目标运行时覆盖；文件不存在/内容非法返回 None（回退 config 的 target）。"""
+    try:
+        value = target_mode_path().read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+    return value if value in TARGET_MODES else None
+
+
+def write_target_mode(mode: str) -> str:
+    if mode not in TARGET_MODES:
+        raise ValueError(f"未知投递目标: {mode}")
+    _atomic_write(target_mode_path(), mode)
     return mode
 
 

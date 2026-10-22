@@ -7,8 +7,10 @@ Copyright 2026 MicToAgent contributors
 把语音转出的文字转发给 kimi web 里当前选中的会话。提交即返回（不等目标
 会话跑完）。适配器本身不做对话，只做转发、轮询和状态管理。
 
-目标会话 = 浏览器里当前选中的会话（target_resolver 后台轮询地址栏缓存，
-发送前再同步刷新一次约 25ms，刚切换会话就说话也命中正确的目标）。
+投递目标抽象在 voice-bridge/targets/（当前固定使用 kimi_web target，
+目标选择 router 后续步骤落地）。目标会话 = 浏览器里当前选中的会话
+（target_resolver 后台轮询地址栏缓存，发送前再同步刷新一次约 25ms，
+刚切换会话就说话也命中正确的目标）。
 三种发送模式（voice-bridge/send.mode，控制面板可运行时切换）：
 快速发送走 REST 绕过输入框（无法配图）；对话框发送 / 输入对话框走粘贴，
 不抢焦点、不代点输入框，前台不是 Kimi Web 或焦点不在输入框则通知。
@@ -28,7 +30,6 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import httpx
 import uvicorn
@@ -36,18 +37,22 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from envutil import bridge_dir, load_dotenv
-from session_info import lookup_session_info
 from runtime_state import (
     SEND_COMPOSE,
     SEND_FAST,
     SEND_LABELS,
     SEND_MODES,
     SEND_NOTES,
+    TARGET_MODES,
     count_hotwords,
     read_send_mode,
     write_gate_cmd,
     write_send_mode,
+    write_target_mode,
 )
+from targets import TargetRouter
+from targets.base import ResolvedTarget
+from targets.kimi_web import KimiWebTarget
 
 load_dotenv()
 BASE_DIR = bridge_dir()
@@ -71,28 +76,6 @@ logger = logging.getLogger("voice-bridge")
 _ready: bool = False
 _last_notice: str = ""
 
-# 跟随当前选中会话的解析器（启动事件里 start）
-from target_resolver import FollowUiResolver, set_address_aliases
-
-# 本机私有地址别名（config.json 的 kimi_web_aliases，gitignore 不外传）。
-# KIMI 基址本身自动注册为别名：base 配成 Tailscale/局域网地址时，地址栏
-# 显示的就是这个 authority，无需再手动配 alias 才能识别会话页。
-set_address_aliases([KIMI] + CONFIG.get("kimi_web_aliases", []))
-
-_resolver = FollowUiResolver(KIMI, CONFIG.get("follow_poll_interval_sec", 0.7))
-
-
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    _resolver.start()
-    yield
-
-
-app = FastAPI(title="voice-bridge", lifespan=_lifespan)
-
-
-# ---------- kimi web REST 客户端 ----------
-
 _toaster = None
 
 
@@ -113,32 +96,36 @@ def _notify(text: str) -> None:
         logger.debug("系统通知失败: %s", e)
 
 
+# 投递目标由 router 选定（target.mode 覆盖 config 的 target，默认 kimi_web；
+# auto 按前台窗口路由，kimi 离线时 fallback 到 dsh）
+_target = KimiWebTarget(KIMI, CONFIG, _notify)
+_router = TargetRouter(CONFIG, _notify, kimi=_target)
+# 跟随当前选中会话的解析器（启动事件里 start）。_resolver / _submit_seq /
+# _watchers 是 target 内部对象的别名，面板与盯梢流程走这里。
+_resolver = _target.resolver
+_submit_seq = _target.submit_seq
+_watchers = _target.watchers
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    _target.start()
+    yield
+
+
+app = FastAPI(title="voice-bridge", lifespan=_lifespan)
+
+
+# ---------- kimi web 调用（委托给 targets.kimi_web） ----------
+
+
 async def _kimi_alive(client: httpx.AsyncClient, base: str) -> bool:
-    try:
-        r = await client.get(f"{base}/api/v1/healthz", timeout=3)
-        return r.status_code == 200
-    except Exception:
-        return False
+    return await _target.is_alive(client, base)
 
 
 async def _send_prompt(client: httpx.AsyncClient, base: str, sid: str, text: str) -> str:
-    r = await client.post(
-        f"{base}/api/v1/sessions/{sid}/prompts",
-        json={"content": [{"type": "text", "text": text}]},
-        timeout=30,
-    )
-    r.raise_for_status()
-    body = r.json()
-    data = body.get("data", body)
-    return data.get("status", "running")
-
-
-# 盯梢去重：每个目标（base+会话）同一时刻最多一个后台盯梢任务，连续说多句
-# 话不会起一堆重复任务、也不会重复弹同一条拍板通知。_submit_seq 记录每个
-# 目标累计提交了几条语音指令，盯梢任务据此判断队列里还有没有新指令要盯。
-# 键是 (base, sid)：同一会话 id 可能分别出现在本机和远端 kimi web。
-_submit_seq: dict = {}
-_watchers: set = set()
+    return await _target.submit_fast(
+        client, ResolvedTarget("kimi_web", base, sid), text)
 
 
 # ---------- 核心流程 ----------
@@ -170,9 +157,7 @@ def _extract_last_user_text(messages: list) -> str:
 
 
 def _paste(text: str, submit: bool) -> str:
-    from draft_input import paste_into_composer
-
-    return paste_into_composer(text, _resolver.port, submit=submit)
+    return _target.paste(text, submit)
 
 
 def _arm_watcher(base: str, sid: str) -> None:
@@ -202,6 +187,12 @@ async def handle_user_text(text: str) -> str:
         return CONFIG["warmup_reply"]
 
     mode = read_send_mode()
+    # router 选定投递目标（dsh target 接入前 choose 恒返回 kimi target）
+    target = _router.choose()
+    if target is None:
+        return "目标没有接入。"
+    if target is not _target:
+        return await _handle_dsh_text(target, mode, text)
     # 目标会话在收到文字时就锁定：若等耗时处理完再解析，会把话发到
     # 用户等待期间切换到的会话（实测事故）
     base, sid = await asyncio.to_thread(_resolve_target)
@@ -211,6 +202,13 @@ async def handle_user_text(text: str) -> str:
     # 只打目标 kimi web，忽略系统代理（Clash 等会把 127.0.0.1 拐走）
     async with httpx.AsyncClient(trust_env=False) as client:
         if not await _kimi_alive(client, target_base):
+            # §4.2 fallback：仅 auto 模式下，kimi 离线而 dsh 在线时改投 dsh
+            fallback = None
+            if _router.effective_mode() == "auto":
+                fallback = await _router.fallback_dsh(client)
+            if fallback is not None:
+                logger.info("kimi 离线，auto 改投 dsh")
+                return await _handle_dsh_text(fallback, mode, text, client)
             _notify("Kimi Web 没有运行，语音指令没有发出去")
             return "Kimi Web 没有运行。"
 
@@ -246,49 +244,41 @@ async def handle_user_text(text: str) -> str:
 
 
 async def _watch_turn(base: str, sid: str) -> None:
-    """后台盯梢一个会话（每目标同一时刻只有一个，见 _watchers 去重）：
-    需要人工拍板时弹一次 Windows 通知，其余静默。队列里还有新语音指令
-    （_submit_seq 增长）就继续盯，回合跑完且队列已空就退出。"""
-    key = (base, sid)
-    interval = CONFIG["poll_interval_sec"]
-    deadline = time.monotonic() + CONFIG["max_wait_sec"]
-    start_deadline = time.monotonic() + 120  # 等本轮真正开始（防 busy=false 误判）
-    seen_seq = _submit_seq.get(key, 0)
-    seen_busy = False
-    notified = False
-    async with httpx.AsyncClient(trust_env=False) as client:
-        try:
-            while time.monotonic() < deadline:
-                try:
-                    r = await client.get(f"{base}/api/v1/sessions/{sid}", timeout=10)
-                    data = r.json().get("data", {})
-                except Exception as e:
-                    logger.warning("轮询状态失败: %s", e)
-                    await asyncio.sleep(interval)
-                    continue
+    await _target.watch_turn(base, sid)
 
-                if data.get("pending_interaction") in ("approval", "question"):
-                    if not notified:
-                        notified = True
-                        _notify("任务执行到一半需要你拍板，请到 Kimi Web 里处理确认")
-                else:
-                    notified = False
 
-                if data.get("busy") or data.get("main_turn_active"):
-                    seen_busy = True
-                else:
-                    if _submit_seq.get(key, 0) > seen_seq:
-                        # 队列里还有新指令没起来，继续盯
-                        seen_seq = _submit_seq[key]
-                    elif seen_busy:
-                        return  # 回合跑完、队列已空
-                    elif time.monotonic() > start_deadline:
-                        return  # 指令始终没起来，放弃
-                await asyncio.sleep(interval)
-        except Exception as e:
-            logger.warning("盯梢任务异常: %s", e)
-        finally:
-            _watchers.discard(key)
+async def _handle_dsh_text(target, mode: str, text: str, client=None) -> str:
+    """DSH 投递流程：resolve 同步锁定（收到文字时调一次），fast 走
+    session/prompt（绝不重发），粘贴模式复用 draft_input 原语。
+    watcher 仍只挂 kimi，dsh 提交后不盯梢（v1 决策）。"""
+    resolved = await asyncio.to_thread(target.resolve)
+    if not resolved.address:
+        _notify("没找到 DSH 桌面版，语音指令没有发出去")
+        return "DSH 没有运行。"
+    logger.info("发送模式=%s 目标=dsh 会话=%s", mode, resolved.session_id)
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(trust_env=False)
+    try:
+        if not await target.is_alive(client, resolved.address):
+            _notify("DSH 桌面版没有运行，语音指令没有发出去")
+            return "DSH 没有运行。"
+        if mode == SEND_FAST:
+            if not resolved.session_id:
+                return "没有选中会话。"
+            status = await target.submit_fast(client, resolved, text)
+            return "已发送。" if status == "accepted" else "没有发出去。"
+        submit = mode != SEND_COMPOSE
+        result = await asyncio.to_thread(target.paste, text, submit)
+        if result != "ok":
+            from draft_input import PASTE_NOTICES
+
+            _notify(PASTE_NOTICES.get(result, PASTE_NOTICES["unavailable"]))
+            return "没有放入输入框。"
+        return "已发送。" if submit else "已放入输入框。"
+    finally:
+        if owns_client:
+            await client.aclose()
 
 
 # ---------- OpenAI 兼容接口 ----------
@@ -360,25 +350,15 @@ def _panel_payload() -> dict:
             gate = raw
     except OSError:
         pass
-    base, sid = _resolver.current_target()
-    on_web = _resolver.on_kimi_web()
-    if sid:
-        target = "session"
-    elif on_web:
-        target = "draft"
-    else:
-        target = "away"
-    info = lookup_session_info(sid)
     return {
         "send_mode": read_send_mode(),
         "ready": _ready,
         "gate": gate,
-        "session_id": sid,
-        "target_base": base,
-        "session_title": info["title"],
-        "workspace": info["workspace"],
-        "on_kimi_web": on_web,
-        "target": target,
+        **_target.panel_state(),
+        # 投递目标路由（target 键已被「session/draft/away」占用，路由状态用新键）
+        "target_mode": _router.effective_mode(),
+        "target_name": _router.current_name(),
+        "target_options": list(TARGET_MODES),
         "hotword_count": count_hotwords(),
         "last_notice": _last_notice,
         "modes": [
@@ -412,13 +392,18 @@ async def panel_get():
 
 @app.post("/v1/panel")
 async def panel_post(request: Request):
-    """控制面板改发送模式或请求静音。下一句语音生效。"""
+    """控制面板改发送模式、投递目标或请求静音。下一句语音生效。"""
     body = await request.json()
     if "send_mode" in body:
         try:
             write_send_mode(str(body["send_mode"]))
         except ValueError:
             return JSONResponse({"error": "未知发送模式"}, status_code=400)
+    if "target" in body:
+        try:
+            write_target_mode(str(body["target"]))
+        except ValueError:
+            return JSONResponse({"error": "未知投递目标"}, status_code=400)
     if "mute" in body:
         write_gate_cmd("0" if body["mute"] else "1")
     return _panel_payload()

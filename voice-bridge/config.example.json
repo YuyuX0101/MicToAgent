@@ -1,5 +1,14 @@
 {
   "kimi_web_base": "http://127.0.0.1:58627",
+  "target": "auto",
+  "dsh": {
+    "home": null,
+    "port": null,
+    "pinned_session_id": null,
+    "window_title_suffix": " — DeepSeek Harness",
+    "submit_key": "enter",
+    "process_path_hints": ["Deepseek harness"]
+  },
   "kimi_web_aliases": [],
   "listen_host": "127.0.0.1",
   "listen_port": 9100,
@@ -24,6 +33,7 @@
     "speech_pad_ms": 500,
     "reopen_grace_ms": 1200,
     "refine_max_sec": 25,
+    "sense_voice_language": "zh",
     "filler_words": ["呃"],
     "post_timeout_sec": 120
   }

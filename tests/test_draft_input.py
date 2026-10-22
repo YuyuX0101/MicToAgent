@@ -121,3 +121,71 @@ def test_compose_does_not_press_enter(monkeypatch):
     assert d.paste_into_composer("草稿", 58627, False) == d.OK
     assert (d._VK_RETURN,) not in calls
     assert (d._VK_CONTROL, d._VK_V) in calls
+
+
+def test_nonbrowser_skips_omnibox_and_toolbar_checks():
+    # browser=False（Electron 无地址栏）：omnibox 关键词和顶部工具栏距离不查
+    assert d.is_composer_focus(
+        control_type="EditControl",
+        name="Address and search bar",
+        top_inset=10,
+        control_height=80,
+        window_height=800,
+        browser=False,
+    )
+
+
+def test_submit_key_vks_mapping():
+    assert d.submit_key_vks("enter") == (d._VK_RETURN,)
+    assert d.submit_key_vks("ctrl+enter") == (d._VK_CONTROL, d._VK_RETURN)
+    assert d.submit_key_vks("shift+enter") == (d._VK_SHIFT, d._VK_RETURN)
+    assert d.submit_key_vks(None) == (d._VK_RETURN,)
+    assert d.submit_key_vks("未知键") == (d._VK_RETURN,)
+
+
+def _stub_dsh_ready(monkeypatch):
+    monkeypatch.setattr(d, "_HAS_WIN", True)
+    monkeypatch.setattr(d, "_foreground_hwnd", lambda: 1)
+    monkeypatch.setattr(d, "_composer_focused", lambda hwnd, browser=True: True)
+    monkeypatch.setattr(d, "_IMAGE_SETTLE_SEC", 0)
+    monkeypatch.setattr(d, "_KEY_GAP_SEC", 0)
+
+
+def test_dsh_paste_image_then_text_then_enter(monkeypatch):
+    """dsh 路径：剪贴板有图先贴图，再贴文字，最后按 enter。"""
+    _stub_dsh_ready(monkeypatch)
+    calls = []
+    monkeypatch.setattr(d, "_snapshot_clipboard", lambda: [(d._CF_DIB, 1)])
+    monkeypatch.setattr(d, "_snapshot_has_image", lambda snap: True)
+    monkeypatch.setattr(d, "_set_clipboard_text", lambda t: calls.append(("set", t)) or True)
+    monkeypatch.setattr(d, "_send_keys", lambda *a: calls.append(("keys", a)))
+    monkeypatch.setattr(d, "_restore_clipboard", lambda snap: calls.append("restore"))
+
+    assert d.paste_into_dsh("你好", True, foreground_ok=lambda: True) == d.OK
+    assert calls[0] == ("keys", (d._VK_CONTROL, d._VK_V))
+    assert calls[1] == ("set", "你好")
+    assert calls[2] == ("keys", (d._VK_CONTROL, d._VK_V))
+    assert calls[3] == ("keys", (d._VK_RETURN,))
+    assert calls[4] == "restore"
+
+
+def test_dsh_paste_custom_submit_key(monkeypatch):
+    _stub_dsh_ready(monkeypatch)
+    calls = []
+    monkeypatch.setattr(d, "_snapshot_clipboard", lambda: [])
+    monkeypatch.setattr(d, "_snapshot_has_image", lambda snap: False)
+    monkeypatch.setattr(d, "_set_clipboard_text", lambda t: True)
+    monkeypatch.setattr(d, "_send_keys", lambda *a: calls.append(a))
+    monkeypatch.setattr(d, "_restore_clipboard", lambda snap: None)
+
+    assert d.paste_into_dsh(
+        "你好", True, foreground_ok=lambda: True, submit_key="ctrl+enter") == d.OK
+    assert (d._VK_CONTROL, d._VK_RETURN) in calls
+
+
+def test_dsh_paste_skips_when_not_foreground(monkeypatch):
+    _stub_dsh_ready(monkeypatch)
+    keys = []
+    monkeypatch.setattr(d, "_send_keys", lambda *a: keys.append(a))
+    assert d.paste_into_dsh("你好", True, foreground_ok=lambda: False) == d.NOT_FOREGROUND
+    assert keys == []

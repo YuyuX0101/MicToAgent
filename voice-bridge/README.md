@@ -8,13 +8,15 @@
 ```
     你说话 → voice-core（ten-vad 分段 + SenseVoice 初稿 / qwen3-asr 精修接力识别 + 热词纠错）
        → POST http://127.0.0.1:9100/v1/chat/completions   ← 本适配器
-       → 按发送模式转发给 Kimi Web（地址见 config.json 的 kimi_web_base）
+       → router 选定投递目标（targets/ 适配层，见下）
+       → 按发送模式转发给目标（Kimi Web 地址见 config.json 的 kimi_web_base；
+         DSH 桌面版自动端口发现）
          · 快速发送：REST 进当前选中会话（无法配图；不抢焦点）
          · 对话框发送 / 输入对话框：粘贴进输入框（可带剪贴板里的图；
-           不切窗口、不代点输入框；前台不是 Kimi Web 或焦点不在输入框
+           不切窗口、不代点输入框；前台不是目标应用或焦点不在输入框
            则弹 Windows 通知）
          · 新建会话草稿页没有会话 id，快速发送会降级为对话框发送
-       → 回复在 Web 界面里看（语音只进不出，无语音合成）；
+       → 回复在目标界面里看（语音只进不出，无语音合成）；
          桥接级问题弹 Windows 通知
 ```
 
@@ -33,11 +35,13 @@
 ## 文件
 
 - `adapter.py` — FastAPI 服务，监听 `127.0.0.1:9100`，暴露 OpenAI 兼容接口和 `/v1/panel`
+- `targets/` — 投递目标适配层（详见下文「投递目标」一节）：`base.py` 协议、
+  `kimi_web.py` 现有 Kimi Web 逻辑、`dsh.py` DSH 桌面版、`__init__.py` 注册表 + router
 - `panel.pyw` — 控制面板：pywebview 壳（无边框直角窗 + DWM 投影，WebView2 渲染），
   UI 是 `panel-ui/`（React + Tailwind，cir-tabs 风格），构建产物
   `panel-ui/dist` 入库、运行时 file:// 直载；改 UI 后在 `panel-ui` 里
   `npm run build` 重建。运行时切换发送模式与门控；齿轮进设置；X 默认回托盘
-- `runtime_state.py` — `send.mode` / `gate.cmd` / `panel.cmd` 原子读写
+- `runtime_state.py` — `send.mode` / `target.mode` / `gate.cmd` / `panel.cmd` 原子读写
 - `target_resolver.py` — 目标解析器：Win32 EnumWindows 找 Edge/Chrome 顶层
   窗口，UIA 读地址栏，三态分类：会话页（`localhost:<port>/sessions/<id>`）/
   草稿页（在 kimi web 但没有 id）/ 不在 kimi web。后台线程低频轮询
@@ -66,6 +70,8 @@
 - `gate.state` — 录音门控状态文件（mic-gate 原子写入，voice-core 音频回调读取；
   自动生成，勿手改）
 - `send.mode` — 发送模式：`fast` / `dialog` / `compose`（本机运行产物，gitignore）
+- `target.mode` — 投递目标：`auto` / `kimi_web` / `dsh`（面板切换即时生效，
+  覆盖 config.json 的 `target`；本机运行产物，gitignore）
 - `hotwords.txt` — 语音识别热词表，本机私有（已 gitignore），
   不存在就直接新建，一行一词。解决同音误听（「会话」被听成「绘画」）
   和英文词乱码（「kimi code」→「chemicde」）。
@@ -89,6 +95,78 @@ voice-core、mic-gate、控制面板；已在运行→打开控制面板。停�
 ```powershell
 .\.venv\Scripts\python.exe voice-bridge\adapter.py
 ```
+
+## 投递目标（targets/ 适配层）
+
+adapter.py 不直接认识具体目标应用：投递目标抽象成 `targets/base.py` 的
+`TargetAdapter` 协议（`resolve` / `submit_fast` / `paste` / `is_foreground` /
+`panel_state` 等），每个目标一个实现文件——`kimi_web.py` 是现有 Kimi Web
+逻辑的封装，`dsh.py` 是 DSH 桌面版；接第三个 agent（Trae、Cursor 之类）
+只加一个文件。`targets/__init__.py` 的 router 负责选定目标：
+
+- `target.mode` 运行时文件（面板切换，即时生效）覆盖 config.json 的
+  `target`；都未设置时默认 `kimi_web`（行为与接入 DSH 前一致）
+- 手动模式（`kimi_web` / `dsh`）：不看前台，直接用指定目标，离线弹通知
+- `auto`：前台窗口是 DSH → 投 DSH；否则走 Kimi 现有逻辑（含 Tailscale
+  远端标签页动态路由，不碰）；kimi 离线而 DSH 在线时改投 DSH
+
+「收到文字时立即 resolve() 锁定目标」的铁律对所有目标生效；盯梢
+（watcher）只挂 kimi——DSH 提交后不盯梢（v1 决策；SessionSummary 有
+`running` 布尔字段，v2 可用轮询 session/list 实现盯梢）。
+
+### DSH 桌面版（targets/dsh.py）
+
+DSH 桌面版是 Electron 壳，本机认证 Host 端口 OS 随机分配、没有地址栏，
+接入机制与 Kimi Web 完全不同：
+
+- **端口发现**：iphlpapi TCP 表枚举 127.0.0.1 监听端口，按进程镜像路径
+  反查（`dsh.process_path_hints`，桌面版优先于 `dsh web` 的 3080）；
+  兜底**并发**扫 401 指纹（`dsh web authentication required`，单口超时
+  1.5s——串行 3s 扫几十个端口会在 DSH 重启瞬间拖到近十秒，实测事故）。
+  结果缓存 30s，连接失败/401 作废重探；`dsh.port` 可手动钉死（排障用）。
+  **固定端口**：桌面版默认 `--port 0`（OS 随机），可在
+  `~/.dsh/profiles/desktop/cordis.patch.yml` 加
+  `- id: webserver` / `config: {host: 127.0.0.1, port: 58628}` 钉死
+  （patch 按 id 整行替换 config；profile 级只对桌面版生效，不影响
+  `dsh web`/headless；Electron 壳读的是实际绑定端口，钉死不影响壳）。
+  钉死后 MicToAgent 侧无需改配置，进程路径反查会直接找到它
+- **认证**：读 `~/.dsh/.credentials.yaml` 的 browser-session secret
+  （`dsh.home` / `DSH_HOME` 可覆盖；文件只读，极简缩进解析，不引 pyyaml），
+  本地自签浏览器会话 Cookie（HMAC-SHA256 签的是 base64url 编码后的 body
+  字符串）。**secret 绝不进日志/通知/面板**；带 Cookie 的请求只发
+  127.0.0.1（authority 强校验）
+- **当前会话**：DSH 服务端不知道用户在看哪个会话，用前台窗口标题反查——
+  剥掉 `dsh.window_title_suffix`（默认 ` — DeepSeek Harness`）得到标题，
+  在 session/list 缓存（≤5s，后台低频轮询刷新）里精确匹配：唯一命中用之；
+  多个同名不猜，弹通知提示固定 `dsh.pinned_session_id`；零命中回退
+  pinned，也没有则弹通知「先在 DSH 里点一下会话，或在面板固定目标」
+- **投递**：`POST /api/session/prompt`（`mode: "queue"`，服务端排队），
+  一次请求一次发送、绝不重发（`requestId` 每次新生成，服务端去重只是
+  保险）；HTTP 200 + `result.ok=true` 才算成功，`ok=false` 读出业务错误
+  弹通知；401 作废端口缓存后放弃并通知（不是重发）
+- **投递后体验**：消息送达后 DSH 窗口**不会自动切到该会话**；用户正看着
+  它时新消息实时显示，否则要自己点开（与 Kimi Web 行为一致，无需处理）
+- **粘贴模式**：复用 draft_input 泛化主流程（剪贴板有图先贴图——DSH
+  桌面版官方支持贴图），跳过浏览器特异的 omnibox 检查；发送键可配
+  `dsh.submit_key`（默认 `enter`，可选 `ctrl+enter` / `shift+enter`）
+
+新增配置键（`config.json`；`config.example.json` 是无注释模板，说明以本节为准）：
+
+- `target`：`auto` / `kimi_web` / `dsh`，默认未设置时按 `kimi_web`
+- `dsh.home`：DSH 数据目录（默认 `~/.dsh`，尊重 `DSH_HOME` 环境变量）
+- `dsh.port`：手动钉死 Host 端口（默认 null = 自动发现）
+- `dsh.pinned_session_id`：固定目标会话 id（标题反查失败的兜底）
+- `dsh.window_title_suffix`：窗口标题后缀（默认 ` — DeepSeek Harness`）
+- `dsh.process_path_hints`：进程镜像路径匹配片段列表（两台机器安装路径
+  不同，各配各的）
+- `dsh.submit_key`：粘贴模式的发送键（默认 `enter`）
+
+**风险与降级**：`/api/session/*` 是 DSH 内部 RPC 非公开 API，升级可能改
+端点/参数——所有 DSH API 细节只出现在 `targets/dsh.py`，适配失败时弹通知
+（「DSH 没有收下这句话…」），绝不静默丢字。若 DSH 改用 OS keychain 存
+凭据导致读不到 secret，fast 模式失效，改用粘贴模式（对话框发送/输入对话框
+不受影响）。同名会话用 `dsh.pinned_session_id` 兜底。`dsh web`（3080）与
+桌面版并存时按进程镜像路径区分，桌面版优先。
 
 ## 关键实现细节（踩过的坑）
 
@@ -120,7 +198,7 @@ voice-core、mic-gate、控制面板；已在运行→打开控制面板。停�
 - `POST /v1/chat/completions` — OpenAI 兼容，支持 `stream: true`（SSE）和非流式
 - `GET /health` — 存活检查
 - `GET /ready` — 端到端就绪（voice-core 预热文本已到达）
-- `GET /v1/panel` / `POST /v1/panel` — 控制面板：发送模式、门控、当前会话；POST `{"send_mode":"dialog"}` 或 `{"mute":true}`
+- `GET /v1/panel` / `POST /v1/panel` — 控制面板：发送模式、投递目标、门控、当前会话；POST `{"send_mode":"dialog"}` 或 `{"target":"auto"}` 或 `{"mute":true}`
 
 ## 录音门控（mic-gate.pyw + voice-core 音频回调）
 
@@ -184,7 +262,9 @@ X 默认隐藏到托盘；托盘左键会把已打开的面板提到最前。真
 
 三种发送方式：**快速发送**（REST，无法配图）、**对话框发送**（粘贴+回车，
 可配图）、**输入对话框**（只粘贴不回车）。写 `send.mode`，下一句生效。
-粘贴两种都要求你自己把 Kimi Web 放在前台并点好输入框。
+粘贴两种都要求你自己把目标应用放在前台并点好输入框。
+主页另有「投递目标」选择器（自动 / Kimi Web / DSH，写 `target.mode`），
+自动模式下选择器下方实时显示「现在投给谁」。
 
 ## 启动向导（voice-launcher.pyw）
 

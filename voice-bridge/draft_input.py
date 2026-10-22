@@ -30,6 +30,7 @@ _CF_DIBV5 = 17
 _CF_UNICODETEXT = 13
 _GMEM_MOVEABLE = 0x0002
 _VK_CONTROL = 0x11
+_VK_SHIFT = 0x10
 _VK_V = 0x56
 _VK_RETURN = 0x0D
 _KEYEVENTF_KEYUP = 0x0002
@@ -52,6 +53,18 @@ _OMNIBOX_HINTS = (
     "address and search",
 )
 
+# 发送键（dsh.submit_key 可配；DSH 输入框 Enter 语义待实测确认，默认 enter）
+_SUBMIT_KEYS = {
+    "enter": (_VK_RETURN,),
+    "ctrl+enter": (_VK_CONTROL, _VK_RETURN),
+    "shift+enter": (_VK_SHIFT, _VK_RETURN),
+}
+
+
+def submit_key_vks(submit_key: str | None) -> tuple[int, ...]:
+    """发送键名 → 虚拟键序列；未知键名回退 enter。"""
+    return _SUBMIT_KEYS.get((submit_key or "enter").lower(), (_VK_RETURN,))
+
 OK = "ok"
 NOT_FOREGROUND = "not_foreground"
 NOT_COMPOSER = "not_composer"
@@ -73,13 +86,17 @@ def is_composer_focus(
     top_inset: int,
     control_height: int,
     window_height: int,
+    browser: bool = True,
 ) -> bool:
-    """根据 UIA 焦点控件判断是不是网页输入框（不是地址栏、不是整页文档）。"""
-    name_l = (name or "").lower()
-    if any(hint in name_l for hint in _OMNIBOX_HINTS):
-        return False
-    if top_inset < _TOOLBAR_PX:
-        return False
+    """根据 UIA 焦点控件判断是不是输入框（不是地址栏、不是整页文档）。
+    browser=False（Electron 等无地址栏应用）跳过 omnibox 关键词和
+    顶部工具栏距离这两项浏览器特异检查。"""
+    if browser:
+        name_l = (name or "").lower()
+        if any(hint in name_l for hint in _OMNIBOX_HINTS):
+            return False
+        if top_inset < _TOOLBAR_PX:
+            return False
     ct = (control_type or "").lower()
     if "edit" in ct or "combobox" in ct:
         return True
@@ -276,7 +293,7 @@ def _control_root_hwnd(ctrl) -> int:
     return int(root or hwnd)
 
 
-def _composer_focused(fg_hwnd: int) -> bool:
+def _composer_focused(fg_hwnd: int, browser: bool = True) -> bool:
     if auto is None or not fg_hwnd:
         return False
     try:
@@ -301,6 +318,7 @@ def _composer_focused(fg_hwnd: int) -> bool:
             top_inset=top_inset,
             control_height=f_h,
             window_height=w_h,
+            browser=browser,
         )
     except Exception:
         logger.debug("判断输入框焦点失败", exc_info=True)
@@ -313,12 +331,17 @@ def _foreground_hwnd() -> int:
     return int(ctypes.windll.user32.GetForegroundWindow() or 0)
 
 
-def paste_into_composer(text: str, port: int, submit: bool = True) -> str:
-    """把文字（及已复制的图）粘贴进当前焦点输入框。
-
-    返回 ok / not_foreground / not_composer / clipboard / unavailable。
-    不 SetForegroundWindow，不寻找输入框。
-    """
+def _paste_flow(
+    text: str,
+    submit: bool,
+    *,
+    foreground_ok,
+    browser: bool,
+    submit_vks: tuple[int, ...],
+) -> str:
+    """粘贴主流程（kimi/dsh 共用）：前台判定 → 输入框焦点启发式 →
+    剪贴板有图先贴图 → 贴文字 → submit 时按发送键 → 尽量恢复剪贴板。
+    返回 ok / not_foreground / not_composer / clipboard / unavailable。"""
     if not _HAS_WIN or not text:
         return UNAVAILABLE
 
@@ -331,12 +354,15 @@ def paste_into_composer(text: str, port: int, submit: bool = True) -> str:
     except Exception:
         pass
     try:
-        state, _ = foreground_kimi_state(port)
-        if state == "away":
-            logger.info("前台不是 Kimi Web，取消粘贴")
+        if not foreground_ok():
+            logger.info("前台不是目标应用，取消粘贴")
             return NOT_FOREGROUND
         fg = _foreground_hwnd()
-        if not _composer_focused(fg):
+        if browser:
+            focused = _composer_focused(fg)
+        else:
+            focused = _composer_focused(fg, browser=False)
+        if not focused:
             logger.info("焦点不在输入框，取消粘贴")
             return NOT_COMPOSER
 
@@ -353,7 +379,7 @@ def paste_into_composer(text: str, port: int, submit: bool = True) -> str:
             _send_keys(_VK_CONTROL, _VK_V)
             time.sleep(_KEY_GAP_SEC)
             if submit:
-                _send_keys(_VK_RETURN)
+                _send_keys(*submit_vks)
             logger.info(
                 "已粘贴进输入框（%d 字, 图=%s, 回车=%s）",
                 len(text),
@@ -369,3 +395,30 @@ def paste_into_composer(text: str, port: int, submit: bool = True) -> str:
                 comtypes.CoUninitialize()
             except Exception:
                 pass
+
+
+def paste_into_composer(text: str, port: int, submit: bool = True) -> str:
+    """把文字（及已复制的图）粘贴进 Kimi Web 当前焦点输入框。
+
+    返回 ok / not_foreground / not_composer / clipboard / unavailable。
+    不 SetForegroundWindow，不寻找输入框。
+    """
+    return _paste_flow(
+        text,
+        submit,
+        foreground_ok=lambda: foreground_kimi_state(port)[0] != "away",
+        browser=True,
+        submit_vks=(_VK_RETURN,),
+    )
+
+
+def paste_into_dsh(text: str, submit: bool, *, foreground_ok, submit_key: str = "enter") -> str:
+    """把文字（及已复制的图）粘贴进 DSH 桌面版当前焦点输入框。
+    前台判定由调用方（targets.dsh）给；跳过浏览器特异的 omnibox 检查。"""
+    return _paste_flow(
+        text,
+        submit,
+        foreground_ok=foreground_ok,
+        browser=False,
+        submit_vks=submit_key_vks(submit_key),
+    )

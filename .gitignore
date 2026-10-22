@@ -242,6 +242,7 @@ voice-bridge/config.json
 voice-bridge/gate.state
 voice-bridge/speak.state
 voice-bridge/send.mode
+voice-bridge/target.mode
 voice-bridge/gate.cmd
 voice-bridge/panel.cmd
 voice-bridge/stop.cmd

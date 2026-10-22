@@ -1049,6 +1049,7 @@ def test_recognizer_dual_routes_draft_and_refine(core, monkeypatch):
     rec.start()
     assert rec.ready.wait(timeout=10)
     assert "sv" in made and "qw" in made      # 双引擎都加载
+    assert made["sv"]["language"] == "zh"     # 语种固定 zh，不用 auto（防误判日/韩语）
     rec.submit(1, 0, np.zeros(512, dtype=np.float32), kind="draft")
     rec.submit(1, 0, np.zeros(512, dtype=np.float32), kind="refine")
     assert results.get(timeout=10) == (1, 0, "draft", "初稿文")

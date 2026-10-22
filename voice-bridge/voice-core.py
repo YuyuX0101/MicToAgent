@@ -98,6 +98,7 @@ CORE_DEFAULTS = {
     "speech_pad_ms": 500,
     "reopen_grace_ms": 1200,
     "refine_max_sec": 25,          # qwen3 精修片段时长上限（音频 13 token/秒，超 ~30s 必超 max_total_len=512）
+    "sense_voice_language": "zh",  # SenseVoice 语种：auto 会把含混片段误判成日/韩语；zh 模式仍支持中英混说
     "filler_words": ["呃"],        # 语气词清理词表（纯规则删除 + 口吃折叠）；嗯/啊/那个/就是语义风险高，别轻易加
     "post_timeout_sec": 120,
 }
@@ -852,13 +853,15 @@ def _load_sherpa_recognizer(engine: str, num_threads: int):
     raise ValueError(f"未知 stt_engine: {engine}")
 
 
-def _load_sense_voice_recognizer(num_threads: int):
-    """SenseVoice-Small（int8）：dual 接力模式的初稿引擎（快，RTF≈0.03）。"""
+def _load_sense_voice_recognizer(num_threads: int, language: str = "zh"):
+    """SenseVoice-Small（int8）：dual 接力模式的初稿引擎（快，RTF≈0.03）。
+    language 固定可配（默认 zh，中英混说照常识别）；不要用 auto——auto 会
+    把发音含混的片段误判成日/韩语并输出假名/谚文。"""
     import sherpa_onnx
     return sherpa_onnx.OfflineRecognizer.from_sense_voice(
         model=str(SENSE_VOICE_DIR / "model.int8.onnx"),
         tokens=str(SENSE_VOICE_DIR / "tokens.txt"),
-        num_threads=num_threads, language="auto", use_itn=True)
+        num_threads=num_threads, language=language, use_itn=True)
 
 
 def _sherpa_infer(rec, audio: np.ndarray) -> str:
@@ -919,7 +922,8 @@ class Recognizer(threading.Thread):
         t0 = time.monotonic()
         recs = {}
         if engine == "dual":
-            recs["draft"] = _load_sense_voice_recognizer(num_threads)
+            recs["draft"] = _load_sense_voice_recognizer(
+                num_threads, core.get("sense_voice_language", "zh"))
             recs["refine"] = _load_sherpa_recognizer("qwen3_asr", num_threads)
         else:
             recs["final"] = _load_sherpa_recognizer(engine, num_threads)

@@ -10,6 +10,14 @@ const SEND_MODES = [
   { key: "compose", label: "输入对话框", tip: "只粘贴到输入框，由你检查后再发。" },
 ];
 
+const TARGET_MODES = [
+  { key: "auto", label: "自动", tip: "看前台窗口：DSH 在前投 DSH，否则投 Kimi Web。" },
+  { key: "kimi_web", label: "Kimi Web", tip: "只投 Kimi Web（浏览器里当前选中的会话）。" },
+  { key: "dsh", label: "DSH", tip: "只投 DeepSeek Harness 桌面版。" },
+];
+
+const targetDisplayName = (name) => (name === "dsh" ? "DeepSeek Harness" : "Kimi Web");
+
 const CLOSE_ACTIONS = [
   { key: "tray", label: "最小化到托盘", caption: "点 X 收回托盘，语音继续工作" },
   { key: "quit", label: "退出进程", caption: "点 X 退出全部语音进程" },
@@ -167,7 +175,7 @@ function WinBtn({ kind, onClick }) {
 }
 
 // ---- 主页 ----
-function Home({ st, onMic, onMode, onSettings }) {
+function Home({ st, onMic, onMode, onTarget, onSettings }) {
   const gate = st?.gate ?? "0";
   const live = gate !== "0";
   const title = gate === "1" ? "常听中" : gate === "2" ? "按住说话" : "静音";
@@ -185,6 +193,13 @@ function Home({ st, onMic, onMode, onSettings }) {
   }
   const workspace = st?.workspace ? clip(st.workspace, 24) : "—";
   const ready = !!st?.ready;
+
+  // 投递目标说明：auto 模式点明「现在会投给谁」，手动模式复用选项说明
+  const targetMode = st?.target_mode ?? "kimi_web";
+  const targetCaption =
+    targetMode === "auto"
+      ? `现在投给 ${targetDisplayName(st?.target_name ?? "kimi_web")}`
+      : TARGET_MODES.find((t) => t.key === targetMode)?.tip ?? "";
 
   return (
     <div className="page-in flex min-h-0 flex-1 flex-col px-5 pb-4">
@@ -228,7 +243,17 @@ function Home({ st, onMic, onMode, onSettings }) {
       </SectionTitle>
       <SegTabs options={SEND_MODES} value={st?.send_mode ?? "fast"} onChange={onMode} />
 
-      <section className="mt-5 divide-y divide-hairline rounded-2xl border border-edge bg-cloud shadow-card">
+      <SectionTitle center className="pt-4">
+        投递目标
+      </SectionTitle>
+      <SegTabs
+        options={TARGET_MODES}
+        value={st?.target_mode ?? "kimi_web"}
+        onChange={onTarget}
+      />
+      <div className="pt-2 text-center text-[11px] text-faint">{targetCaption}</div>
+
+      <section className="mt-4 divide-y divide-hairline rounded-2xl border border-edge bg-cloud shadow-card">
         <StatRow label="工作区">
           <span
             className={`text-[12px] ${st?.workspace ? "text-ink" : "text-faint"}`}
@@ -396,6 +421,16 @@ export default function App() {
               call("set_gate", { gate: live ? "0" : "1" }, live);
             }}
             onMode={(m) => call("set_send_mode", { send_mode: m }, m)}
+            onTarget={(t) =>
+              call(
+                "set_target",
+                {
+                  target_mode: t,
+                  target_name: t === "auto" ? st?.target_name ?? "kimi_web" : t,
+                },
+                t
+              )
+            }
             onSettings={() => setPage("settings")}
           />
         ) : (

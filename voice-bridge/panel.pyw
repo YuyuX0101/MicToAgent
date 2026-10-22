@@ -39,12 +39,14 @@ from runtime_state import (
     consume_panel_show,
     read_panel_prefs,
     read_send_mode,
+    read_target_mode,
     request_panel_show,
     set_autostart,
     stop_requested,
     write_gate_cmd,
     write_panel_prefs,
     write_send_mode,
+    write_target_mode,
 )
 
 BASE = bridge_dir()
@@ -83,6 +85,9 @@ def gather_state() -> dict:
         "gate": "0",
         "session_id": None,
         "target": "away",
+        "target_mode": read_target_mode() or "kimi_web",
+        "target_name": "kimi_web",
+        "target_options": ["auto", "kimi_web", "dsh"],
         "last_notice": "",
     }
     try:
@@ -119,6 +124,17 @@ class PanelApi:
         write_send_mode(str(mode))
         try:
             _http_json(PANEL_API, {"send_mode": str(mode)})
+        except Exception:
+            pass
+        return gather_state()
+
+    def set_target(self, mode: str) -> dict:
+        try:
+            write_target_mode(str(mode))
+        except ValueError:
+            return gather_state()
+        try:
+            _http_json(PANEL_API, {"target": str(mode)})
         except Exception:
             pass
         return gather_state()
